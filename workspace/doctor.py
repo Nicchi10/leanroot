@@ -1,8 +1,8 @@
 """
 Check that the lean workspace is really in force.
 
-    python doctor.py          static checks (free)
-    python doctor.py --live   also opens two real Claude sessions (Haiku, a few cents): one inside the root, one outside, and
+    python .lean/doctor.py          static checks (free)
+    python .lean/doctor.py --live   also opens two real Claude sessions (Haiku, a few cents): one inside the root, one outside, and
                               checks what their hooks actually did
 
 Exit 0 = all checks pass.
@@ -18,7 +18,8 @@ import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+LEAN = Path(__file__).resolve().parent   # <root>/.lean
+ROOT = LEAN.parent
 HOME = Path(os.environ.get("LEAN_HOME") or Path.home())
 APPDATA = Path(os.environ.get("LEAN_APPDATA") or os.environ.get("APPDATA") or HOME / "AppData" / "Roaming")
 CLAUDE = HOME / ".claude"
@@ -40,21 +41,35 @@ def read_json(path: Path) -> dict:
         return {}
 
 
+def plugin_path() -> Path:
+    """
+    The caveman copy this workspace uses: its own, or the one it shares with another workspace (config plugin_dir)
+    """
+    return Path(read_json(LEAN / "config.json").get("plugin_dir") or LEAN / "plugins" / "caveman")
+
+
 def static() -> None:
     reinstall = f'python install.py "{ROOT}"'
-    cfg = read_json(ROOT / ".lean.json")
+    cfg = read_json(LEAN / "config.json")
     s = read_json(CLAUDE / "settings.json")
-    cmd = f'python "{(ROOT / "bootstrap.py").as_posix()}" --hook'
+    cmd = f'python "{(LEAN / "bootstrap.py").as_posix()}" --hook'
     hooks = [h.get("command") for e in s.get("hooks", {}).get("SessionStart", []) for h in e.get("hooks", [])]
     check(cmd in hooks, "SessionStart hook runs this root's bootstrap.py", reinstall)
 
-    r = subprocess.run([sys.executable, str(ROOT / "bootstrap.py"), "--check"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    check(r.returncode == 0, "every project folder has the guard settings and .plans (bootstrap --check)", f'python "{ROOT / "bootstrap.py"}"')
+    r = subprocess.run([sys.executable, str(LEAN / "bootstrap.py"), "--check"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    check(r.returncode == 0, "every project folder has the guard settings and .plans (bootstrap --check)", f'python "{LEAN / "bootstrap.py"}"')
 
     tmpdir = s.get("env", {}).get("CLAUDE_CODE_TMPDIR")
     if cfg.get("tmp_in_root"):
-        check(isinstance(tmpdir, str) and Path(tmpdir).resolve() == (ROOT / ".tmp").resolve(),
-              "CLAUDE_CODE_TMPDIR points to <root>/.tmp (scratchpads stay in the workspace)", f"{reinstall} --tmp-in-root")
+        ours = isinstance(tmpdir, str) and Path(tmpdir).resolve() == (LEAN / "tmp").resolve()
+        taken = isinstance(tmpdir, str) and not ours and Path(tmpdir).name == "tmp" and Path(tmpdir).parent.name == ".lean"
+        check(ours, "CLAUDE_CODE_TMPDIR points to <root>/.lean/tmp (scratchpads stay in the workspace)",
+              f"another workspace now hosts the temp files ({Path(tmpdir).parent.parent}): one per machine. "
+              f"Take them back with {reinstall} --tmp-in-root --choose tmpdir=replace" if taken else f"{reinstall} --tmp-in-root")
+    tmp = LEAN / "tmp"
+    if tmp.is_dir():
+        size = sum(f.stat().st_size for f in tmp.rglob("*") if f.is_file())
+        print(f"[--] {tmp}: {size / 1048576:.1f} MB (cleaned daily of items older than tmp_max_age_days; now: python .lean/bootstrap.py --clean-tmp)")
     if tmpdir:
         check(Path(tmpdir).is_dir(), f"CLAUDE_CODE_TMPDIR folder exists ({tmpdir})",
               "the workspace was moved or renamed? re-run install.py from its new place")
@@ -67,7 +82,7 @@ def static() -> None:
         if cfg.get("claude_md") != "keep":
             check(MARKER in root_cfg.read_text(encoding="utf-8"), "CLAUDE.md contains the workspace rules block", f"{reinstall} --choose claude_md=append")
 
-    plugin_dir = ROOT / ".plugins" / "caveman"
+    plugin_dir = plugin_path()
     if not plugin_dir.exists():
         print("[--] caveman not installed (--no-caveman): plugin checks skipped")
         return
@@ -102,7 +117,7 @@ def live() -> None:
         check(False, "live test needs the claude CLI on PATH")
         return
     inside = ROOT / f"_doctor_{int(time.time())}"
-    # Not tempfile's default dir: with CLAUDE_CODE_TMPDIR set, Claude Code hands TMPDIR=<root>/.tmp to shell commands,
+    # Not tempfile's default dir: with CLAUDE_CODE_TMPDIR set, Claude Code hands TMPDIR=<root>/.lean/tmp to shell commands,
     # and tempfile would put the "outside" folder inside the root
     system_tmp = next((Path(p) for p in (os.environ.get("TEMP"), os.environ.get("TMP"), HOME / "AppData" / "Local" / "Temp")
                        if p and ROOT not in Path(p).resolve().parents and Path(p).resolve() != ROOT and Path(p).is_dir()), HOME)
@@ -118,13 +133,13 @@ def live() -> None:
         run_session(inside)
         check((inside / ".claude" / "settings.local.json").exists(),
               "live: a NEW folder gets the guard settings at its first session (hook ran)")
-        if read_json(ROOT / ".lean.json").get("tmp_in_root"):
-            fresh = [p for p in (ROOT / ".tmp").rglob("*") if p.stat().st_mtime >= start] if (ROOT / ".tmp").exists() else []
-            check(bool(fresh), "live: the session wrote its temp files under <root>/.tmp, not the system temp")
-        scope_root = read_json(ROOT / ".lean.json").get("caveman_scope", "root") == "root"
-        if (ROOT / ".plugins" / "caveman").exists():
+        if read_json(LEAN / "config.json").get("tmp_in_root"):
+            fresh = [p for p in (LEAN / "tmp").rglob("*") if p.stat().st_mtime >= start] if (LEAN / "tmp").exists() else []
+            check(bool(fresh), "live: the session wrote its temp files under <root>/.lean/tmp, not the system temp")
+        scope_root = read_json(LEAN / "config.json").get("caveman_scope", "root") == "root"
+        if plugin_path().exists():
             check("caveman" in new_modes(start), "live: caveman activates in a session inside the root")
-        if (ROOT / ".plugins" / "caveman").exists() and scope_root:
+        if plugin_path().exists() and scope_root:
             start = time.time() - 1
             (outside / "probe.txt").write_text("probe\n", encoding="utf-8")
             run_session(outside)
@@ -133,7 +148,7 @@ def live() -> None:
         shutil.rmtree(inside, ignore_errors=True)
         shutil.rmtree(outside, ignore_errors=True)
         for folder in (inside, outside):   # leave no trace of the test sessions
-            subprocess.run([sys.executable, str(ROOT / "forget.py"), str(folder), "--yes"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+            subprocess.run([sys.executable, str(LEAN / "forget.py"), str(folder), "--yes"], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def main() -> int:

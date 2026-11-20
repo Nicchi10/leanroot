@@ -3,7 +3,7 @@ Install the lean workspace into a folder (Windows, Python 3.9+, git, Node, Claud
 
     python install.py <workspace-root> [--language English] [--no-caveman] [--tmp-in-root] [--dry-run] [--yes] [--choose KEY=VALUE ...]
 
-    --tmp-in-root   set CLAUDE_CODE_TMPDIR to <root>/.tmp: Claude Code's temp files, session scratchpad included, stay in the
+    --tmp-in-root   set CLAUDE_CODE_TMPDIR to <root>/.lean/tmp: Claude Code's temp files, session scratchpad included, stay in the
                     workspace. It is a user setting, so sessions outside the workspace put their temp files there too
 
 First a preflight looks for what an existing setup would clash with, and nothing is changed until every clash has a decision:
@@ -15,18 +15,21 @@ First a preflight looks for what an existing setup would clash with, and nothing
     outside_readers  projects already read outside the root     unguard | guard
 
 Decisions come from --choose KEY=VALUE, from the prompt when run in a terminal, or --yes takes every recommended one.
-They are saved in <root>/.lean.json, which bootstrap.py and doctor.py read.
+They are saved in <root>/.lean/config.json, which bootstrap.py and doctor.py read.
+
+Everything the framework adds lives in <root>/.lean (hidden on Windows), except CLAUDE.md and .caveman.json, which must sit
+in the root to be found. A flat layout from an older install (tools, .lean.json, .plugins, .tmp in the root) is migrated.
 
 Then, in order (it is safe to re-run):
-  1. copies bootstrap.py, forget.py, doctor.py into the root; writes or extends CLAUDE.md as decided
+  1. copies bootstrap.py, forget.py, doctor.py into <root>/.lean; writes or extends CLAUDE.md as decided
   2. migrates auto-memories into each project's CLAUDE.local.md, if decided
-  3. fetches a trimmed caveman into <root>/.plugins/caveman (fetch_caveman.py)
+  3. fetches a trimmed caveman into <root>/.lean/plugins/caveman (fetch_caveman.py)
   4. ~/.claude/settings.json (backed up first): SessionStart hook running bootstrap.py, the local marketplace + plugin,
      the caveman status line (only if you have no status line already), other caveman plugins disabled if decided
   5. registers and installs the plugin with the `claude` CLI
   6. runs bootstrap.py once
 
-Then: python <root>/doctor.py
+Then: python <root>/.lean/doctor.py
 """
 from __future__ import annotations
 
@@ -48,7 +51,33 @@ PLUGIN = "caveman@caveman-lean"
 MARKETPLACE = "caveman-lean"
 MARK_START = "<!-- lean-workspace:start -->"
 MARK_END = "<!-- lean-workspace:end -->"
-SKIP = {".git", ".claude", ".plugins", "node_modules", "venv", ".venv", "__pycache__"}
+SKIP = {".git", ".claude", ".lean", ".plugins", "node_modules", "venv", ".venv", "__pycache__"}
+LEAN = ".lean"                     # <root>/.lean holds every file of the framework
+LEGACY_TOOL_MARKS = ("Bootstrap the workspace guardrails", "Bootstrap NG10 agent guardrails",
+                     "Forget a folder", "Check that the lean workspace")
+
+
+def lean(root: Path) -> Path:
+    return root / LEAN
+
+
+def config_path(root: Path) -> Path:
+    return lean(root) / "config.json"
+
+
+def saved_config(root: Path) -> dict:
+    """
+    Decisions of a previous install: <root>/.lean/config.json, or <root>/.lean.json from the flat layout
+    """
+    return read_json(config_path(root)) or read_json(root / ".lean.json")
+
+
+def hook_command(root: Path) -> str:
+    return f'python "{(lean(root) / "bootstrap.py").as_posix()}" --hook'
+
+
+def legacy_hook_command(root: Path) -> str:
+    return f'python "{(root / "bootstrap.py").as_posix()}" --hook'
 
 
 def say(msg: str) -> None:
@@ -136,18 +165,22 @@ def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[l
     """
     conflicts, notes, facts = [], [], {}
     settings = read_json(CLAUDE / "settings.json")
-    saved = read_json(root / ".lean.json")   # decisions of a previous install are not asked again
+    saved = saved_config(root)   # decisions of a previous install are not asked again
 
     if tmp_in_root:
         current = settings.get("env", {}).get("CLAUDE_CODE_TMPDIR")
-        if current and norm(current) != norm(str(root / ".tmp")):
+        if current and norm(current) not in (norm(str(lean(root) / "tmp")), norm(str(root / ".tmp"))):
+            other_ws = Path(current).name == "tmp" and Path(current).parent.name == LEAN
             conflicts.append({
-                "key": "tmpdir", "recommended": "replace",
-                "title": f"CLAUDE_CODE_TMPDIR is already set to {current}",
-                "why": "--tmp-in-root moves Claude Code's temp files (session scratchpad included) into <root>/.tmp",
-                "options": {"replace": f"set it to {root / '.tmp'}",
+                "key": "tmpdir", "recommended": "keep" if other_ws else "replace",
+                "title": f"CLAUDE_CODE_TMPDIR is already set to {current}" + (" (another lean workspace)" if other_ws else ""),
+                "why": ("it is one user setting, so only one workspace per machine can host Claude Code's temp files; "
+                        "replacing it moves them out of the other workspace") if other_ws else
+                       "--tmp-in-root moves Claude Code's temp files (session scratchpad included) into <root>/.lean/tmp",
+                "options": {"replace": f"set it to {lean(root) / 'tmp'}",
                             "keep": "keep your value: temp files stay outside the root"}})
-        if os.environ.get("CLAUDE_CODE_TMPDIR"):
+        env_tmp = os.environ.get("CLAUDE_CODE_TMPDIR")
+        if env_tmp and norm(env_tmp) not in (norm(str(lean(root) / "tmp")), norm(str(root / ".tmp"))):
             notes.append("CLAUDE_CODE_TMPDIR is also set in your environment: remove it there if temp files still land outside the root")
 
     if with_caveman:
@@ -172,7 +205,7 @@ def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[l
 
         if (root / ".caveman.json").exists() and read_json(root / ".caveman.json").get("defaultMode") != "caveman":
             notes.append(".caveman.json in the root will be set to defaultMode 'caveman' (old file backed up)")
-        plugin_dir = root / ".plugins" / "caveman"
+        plugin_dir = lean(root) / "plugins" / "caveman"
         mods = plugin_dir / "MODIFICATIONS.md"
         if plugin_dir.exists() and not (mods.exists() and MARKETPLACE in mods.read_text(encoding="utf-8", errors="replace")):
             notes.append(f"{plugin_dir} is not ours: it will be moved to {plugin_dir.name}.bak-<time>")
@@ -180,7 +213,7 @@ def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[l
             notes.append("you already have a status line: kept, so no [CAVEMAN] badge")
 
     memories = []
-    done = set(read_json(root / ".lean.json").get("migrated_memory", []))
+    done = set(saved.get("migrated_memory", []))
     for d in sorted((CLAUDE / "projects").glob("*")):
         files = sorted(p for p in (d / "memory").glob("*.md") if p.name != "MEMORY.md" and str(p) not in done) if (d / "memory").is_dir() else []
         cwd = project_cwd(d) if files else None
@@ -228,7 +261,7 @@ def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[l
             "key": "outside_readers", "recommended": "unguard",
             "title": f"projects already read outside the root: {', '.join(readers)}",
             "why": "the perimeter would block those reads and break their workflow",
-            "options": {"unguard": "no perimeter in those folders (listed in .lean.json, editable)",
+            "options": {"unguard": "no perimeter in those folders (listed in .lean/config.json, editable)",
                         "guard": "apply the perimeter anyway"}})
 
     for e in settings.get("hooks", {}).get("SessionStart", []):
@@ -306,9 +339,10 @@ def rules_block(root: Path, language: str) -> str:
 
 def copy_tools(root: Path, language: str, decisions: dict, dry: bool) -> None:
     for name in TOOLS:
-        say(f"copy {name}")
+        say(f"copy {name} -> {LEAN}/{name}")
         if not dry:
-            shutil.copy2(HERE / "workspace" / name, root / name)
+            lean(root).mkdir(exist_ok=True)
+            shutil.copy2(HERE / "workspace" / name, lean(root) / name)
     target = root / "CLAUDE.md"
     block = rules_block(root, language)
     if not target.exists():
@@ -374,16 +408,36 @@ def backup(path: Path, dry: bool) -> None:
         say(f"backup {bak}")
 
 
+def is_our_caveman(path: Path) -> bool:
+    mods = path / "MODIFICATIONS.md"
+    return mods.exists() and MARKETPLACE in mods.read_text(encoding="utf-8", errors="replace")
+
+
+def shared_caveman(root: Path):
+    """
+    Another workspace's caveman copy, if the machine already uses one: one plugin per machine, or every session would
+    run two cavemans. Returns its folder, or None
+    """
+    registered = read_json(CLAUDE / "settings.json").get("extraKnownMarketplaces", {}).get(MARKETPLACE, {}).get("source", {}).get("path")
+    if registered and not under(registered, root) and is_our_caveman(Path(registered)):
+        return Path(registered)
+    return None
+
+
 def caveman_files(root: Path, decisions: dict, dry: bool) -> Path:
-    dest = root / ".plugins" / "caveman"
-    mods = dest / "MODIFICATIONS.md"
-    if dest.exists() and not (mods.exists() and MARKETPLACE in mods.read_text(encoding="utf-8", errors="replace")):
-        backup(dest, dry)
-    say(f"fetch trimmed caveman -> {dest}")
-    if not dry:
-        sys.path.insert(0, str(HERE))
-        import fetch_caveman
-        fetch_caveman.fetch(dest)
+    shared = shared_caveman(root)
+    if shared:
+        say(f"caveman shared with another workspace: {shared} (one copy per machine)")
+        dest = shared
+    else:
+        dest = lean(root) / "plugins" / "caveman"
+        if dest.exists() and not is_our_caveman(dest):
+            backup(dest, dry)
+        say(f"fetch trimmed caveman -> {dest}")
+        if not dry:
+            sys.path.insert(0, str(HERE))
+            import fetch_caveman
+            fetch_caveman.fetch(dest)
     if read_json(root / ".caveman.json").get("defaultMode") != "caveman":
         backup(root / ".caveman.json", dry)
         write_json(root / ".caveman.json", {"defaultMode": "caveman"}, dry)
@@ -408,14 +462,21 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
         say(f"backup {bak}")
     d = read_json(path)
 
-    cmd = f'python "{(root / "bootstrap.py").as_posix()}" --hook'
+    cmd = hook_command(root)
     ss = d.setdefault("hooks", {}).setdefault("SessionStart", [])
+    old = legacy_hook_command(root)
+    for e in ss:
+        kept = [h for h in e.get("hooks", []) if h.get("command") != old]
+        if len(kept) != len(e.get("hooks", [])):
+            e["hooks"] = kept
+            say("old SessionStart hook (flat layout) removed")
+    ss[:] = [e for e in ss if e.get("hooks")]
     if not any(h.get("command") == cmd for e in ss for h in e.get("hooks", [])):
         ss.append({"hooks": [{"type": "command", "command": cmd, "timeout": 30, "statusMessage": "workspace bootstrap..."}]})
         say("SessionStart hook added")
 
     if tmp_in_root and decisions.get("tmpdir") != "keep":
-        tmp = root / ".tmp"
+        tmp = lean(root) / "tmp"
         if not dry:
             tmp.mkdir(exist_ok=True)
         d.setdefault("env", {})["CLAUDE_CODE_TMPDIR"] = str(tmp)
@@ -426,6 +487,7 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
             for k in facts.get("other_caveman", []):
                 d.setdefault("enabledPlugins", {})[k] = False
                 say(f"{k} disabled (still installed: `claude plugin enable {k}` restores it)")
+        facts["old_marketplace_path"] = d.get("extraKnownMarketplaces", {}).get(MARKETPLACE, {}).get("source", {}).get("path")
         d.setdefault("extraKnownMarketplaces", {})[MARKETPLACE] = {"source": {"source": "directory", "path": str(plugin_dir)}}
         d.setdefault("enabledPlugins", {})[PLUGIN] = True
         say(f"plugin {PLUGIN} enabled")
@@ -442,7 +504,7 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
     write_json(path, d, dry)
 
 
-def claude_cli(plugin_dir: Path, dry: bool) -> None:
+def claude_cli(plugin_dir: Path, facts: dict, dry: bool) -> None:
     if dry:
         say("would run: claude plugin marketplace add / plugin install")
         return
@@ -450,19 +512,28 @@ def claude_cli(plugin_dir: Path, dry: bool) -> None:
         say("claude CLI not found: install the plugin later with "
             f'`claude plugin marketplace add "{plugin_dir}"` and `claude plugin install {PLUGIN}`')
         return
-    for args in (["plugin", "marketplace", "add", str(plugin_dir)], ["plugin", "install", PLUGIN, "--scope", "user"]):
+    steps = [["plugin", "marketplace", "add", str(plugin_dir)], ["plugin", "install", PLUGIN, "--scope", "user"]]
+    old = facts.get("old_marketplace_path")
+    if old and norm(old) != norm(str(plugin_dir)):   # moved (flat layout): register the new folder
+        steps.insert(0, ["plugin", "marketplace", "remove", MARKETPLACE])
+    for args in steps:
         r = subprocess.run(["claude", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", shell=os.name == "nt")
         say(f"claude {' '.join(args[:3])}: {'ok' if r.returncode == 0 else 'FAILED ' + (r.stderr or r.stdout).strip()[:200]}")
 
 
 def save_config(root: Path, decisions: dict, facts: dict, with_caveman: bool, tmp_in_root: bool, dry: bool) -> None:
-    path = root / ".lean.json"
-    cfg = read_json(path)
+    path = config_path(root)
+    cfg = saved_config(root)
     if tmp_in_root:
         cfg["tmp_in_root"] = decisions.get("tmpdir") != "keep"
     if with_caveman:
         cfg["caveman_scope"] = decisions.get("caveman_scope", cfg.get("caveman_scope", "root"))
     cfg["auto_memory"] = decisions.get("memory") == "keep" if "memory" in decisions else cfg.get("auto_memory", False)
+    shared = facts.get("plugin_dir")
+    if shared and not under(shared, root):
+        cfg["plugin_dir"] = shared
+    else:
+        cfg.pop("plugin_dir", None)
     unguarded = set(cfg.get("unguarded", []))
     if decisions.get("outside_readers") == "unguard":
         unguarded |= set(facts.get("readers", []))
@@ -476,7 +547,55 @@ def save_config(root: Path, decisions: dict, facts: dict, with_caveman: bool, tm
         migrated |= {str(p) for cwd, files in facts.get("memories", []) if Path(cwd).is_dir() for p in files}
         cfg["migrated_memory"] = sorted(migrated)
     write_json(path, cfg, dry)
-    say(f".lean.json: {json.dumps(cfg)}")
+    say(f"{LEAN}/config.json: {json.dumps(cfg)}")
+
+
+def migrate_flat_layout(root: Path, plugin_dir) -> None:
+    """
+    Clean what an older install left in the root: tools, .lean.json, .plugins/caveman, .tmp
+    """
+    for name in TOOLS:
+        old = root / name
+        if old.exists() and any(m in old.read_text(encoding="utf-8", errors="replace")[:400] for m in LEGACY_TOOL_MARKS):
+            old.unlink()
+            say(f"flat layout: removed {name} from the root (now in {LEAN}/)")
+    if (root / ".lean.json").exists():
+        (root / ".lean.json").unlink()
+        say(f"flat layout: .lean.json merged into {LEAN}/config.json")
+    old_plugin = root / ".plugins" / "caveman"
+    mods = old_plugin / "MODIFICATIONS.md"
+    if plugin_dir and old_plugin.exists() and mods.exists() and MARKETPLACE in mods.read_text(encoding="utf-8", errors="replace"):
+        shutil.rmtree(old_plugin, ignore_errors=True)
+        say("flat layout: old .plugins/caveman removed")
+    if (root / ".plugins").is_dir() and not any((root / ".plugins").iterdir()):
+        (root / ".plugins").rmdir()
+    old_tmp, new_tmp = root / ".tmp", lean(root) / "tmp"
+    if old_tmp.is_dir():
+        new_tmp.mkdir(parents=True, exist_ok=True)
+        left = 0
+        for item in list(old_tmp.iterdir()):
+            try:
+                shutil.move(str(item), str(new_tmp / item.name))
+            except Exception:
+                left += 1   # in use by a running session
+        try:
+            old_tmp.rmdir()
+            say(f"flat layout: .tmp moved to {LEAN}/tmp")
+        except OSError:
+            say(f"flat layout: .tmp moved to {LEAN}/tmp except {left} item(s) in use: delete {old_tmp} when no session runs")
+
+
+def hide(root: Path) -> None:
+    """
+    Windows: hide the framework's own entries so the root shows only projects (and CLAUDE.md)
+    """
+    if os.name != "nt":
+        return
+    for name in (LEAN, ".caveman.json", ".claude"):
+        target = root / name
+        if target.exists():
+            subprocess.run(["attrib", "+h", str(target)], capture_output=True)
+    say(f"hidden: {LEAN}, .caveman.json, .claude")
 
 
 def main() -> int:
@@ -509,7 +628,7 @@ def main() -> int:
     with_caveman = "--no-caveman" not in flags
     check_root(root)
     # once chosen, --tmp-in-root sticks: re-runs without the flag keep it
-    tmp_in_root = "--tmp-in-root" in flags or read_json(root / ".lean.json").get("tmp_in_root") is True
+    tmp_in_root = "--tmp-in-root" in flags or saved_config(root).get("tmp_in_root") is True
     print(f"Workspace root: {root}{'  (dry run: nothing is changed)' if dry else ''}")
 
     decisions, facts = preflight(root, with_caveman, tmp_in_root, choices, "--yes" in flags, dry)
@@ -518,13 +637,17 @@ def main() -> int:
     if decisions.get("memory") == "migrate":
         migrate_memories(root, facts["memories"], dry)
     plugin_dir = caveman_files(root, decisions, dry) if with_caveman else None
+    facts["plugin_dir"] = str(plugin_dir) if plugin_dir else None
     user_settings(root, plugin_dir, decisions, facts, tmp_in_root, dry)
-    if plugin_dir and "--no-cli" not in flags:
-        claude_cli(plugin_dir, dry)
+    shared = plugin_dir is not None and not under(str(plugin_dir), root)
+    if plugin_dir and "--no-cli" not in flags and not shared:   # a shared copy is already installed
+        claude_cli(plugin_dir, facts, dry)
     save_config(root, decisions, facts, with_caveman, tmp_in_root, dry)
     if not dry:
-        subprocess.run([sys.executable, str(root / "bootstrap.py")], check=False)
-    print(f"\nDone. Check it: python \"{root / 'doctor.py'}\"   (add --live for a real session test)")
+        migrate_flat_layout(root, plugin_dir)
+        hide(root)
+        subprocess.run([sys.executable, str(lean(root) / "bootstrap.py")], check=False)
+    print(f"\nDone. Check it: python \"{lean(root) / 'doctor.py'}\"   (add --live for a real session test)")
     return 0
 
 

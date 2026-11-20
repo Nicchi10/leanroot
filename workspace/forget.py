@@ -2,9 +2,9 @@
 
 Run it after deleting a folder (inside the workspace or anywhere else):
 
-    python forget.py <folder>            list what would go, then ask
-    python forget.py <folder> --yes      no question
-    python forget.py <folder> --force    also if the folder still exists
+    python .lean/forget.py <folder>            list what would go, then ask
+    python .lean/forget.py <folder> --yes      no question
+    python .lean/forget.py <folder> --force    also if the folder still exists
                                          (keeps the folder, forgets the rest)
 
 Sub-folders count too: forgetting a/ also forgets a/b.
@@ -35,7 +35,8 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("LEAN_HOME") or Path.home())   # LEAN_HOME: tests only
 CLAUDE = HOME / ".claude"
-ROOT = Path(__file__).resolve().parent
+LEAN = Path(__file__).resolve().parent   # <root>/.lean
+ROOT = LEAN.parent
 BS = chr(92)
 
 
@@ -222,7 +223,7 @@ def main() -> int:
         raw = Path.cwd() / raw
     raw = Path(os.path.normpath(raw))
     target = norm(str(raw))
-    forbidden = {norm(str(x)) for x in (ROOT, HOME, CLAUDE, HOME / "Desktop", Path(raw.anchor))}
+    forbidden = {norm(str(x)) for x in (ROOT, LEAN, HOME, CLAUDE, HOME / "Desktop", Path(raw.anchor))}
     if target in forbidden or len(raw.parts) < 4:
         print(f"Refused: {raw} is too high up (workspace root, home, Desktop, ~/.claude or drive root).")
         return 2

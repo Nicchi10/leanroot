@@ -35,8 +35,21 @@ Requirements: Windows, Python 3.9+, git, Node.js (for caveman's hooks), Claude C
 ```
 git clone <this repo>
 python install.py "C:\path\to\workspace" --language English
-python "C:\path\to\workspace\doctor.py" --live
+python "C:\path\to\workspace\.lean\doctor.py" --live
 ```
+
+Everything the framework adds goes in one hidden folder, so the workspace root shows only your projects and `CLAUDE.md`:
+
+```
+workspace\
+  CLAUDE.md          workspace rules (loaded by every session in the workspace)
+  .caveman.json      hidden; must sit in the root, caveman looks for it walking up the folders
+  .claude\           hidden; Claude Code's own settings for the root
+  .lean\             hidden; bootstrap.py, forget.py, doctor.py, config.json, plugins\caveman, tmp\
+  your-project\
+```
+
+An install from an older version with these files loose in the root is moved into `.lean\` automatically.
 
 `install.py` is safe to re-run, and it backs up `~/.claude/settings.json` first. Before changing anything it runs a preflight against your existing setup and stops on every clash until you decide:
 
@@ -48,10 +61,14 @@ python "C:\path\to\workspace\doctor.py" --live
 | the workspace already has its own `CLAUDE.md` | append the rules block (marked, refreshed on re-runs) / keep yours untouched |
 | projects already read outside the workspace | leave them unguarded / guard them anyway |
 
-Answer at the prompt, pass `--choose KEY=VALUE`, or `--yes` for every recommended choice. Decisions are saved in `<workspace>/.lean.json` and not asked again. An existing status line is never replaced.
+Answer at the prompt, pass `--choose KEY=VALUE`, or `--yes` for every recommended choice. Decisions are saved in `<workspace>\.lean\config.json` and not asked again. An existing status line is never replaced.
 Other options: `--no-caveman` (perimeter and setup only), `--dry-run` (print, change nothing).
 
-**`--tmp-in-root` (recommended for a complete perimeter):** by default Claude Code keeps its temp files, the session scratchpad included, in the system temp folder (`%TEMP%\claude\...`), outside the workspace. This option sets `CLAUDE_CODE_TMPDIR` to `<workspace>\.tmp`, so they stay inside. Shell commands run by Claude then get the same folder as `TEMP`/`TMPDIR`. It is a user setting: sessions outside the workspace use that folder too. The folder is cleaned with each session's transcript (30 days by default), not by Windows. If you move or rename the workspace, run `install.py` again from the new place, `doctor.py` reports the broken path.
+**`--tmp-in-root` (recommended for a complete perimeter):** by default Claude Code keeps its temp files, the session scratchpad included, in the system temp folder (`%TEMP%\claude\...`), outside the workspace. This option sets `CLAUDE_CODE_TMPDIR` to `<workspace>\.lean\tmp`, so they stay inside. Shell commands run by Claude then get the same folder as `TEMP`/`TMPDIR`. It is a user setting: sessions outside the workspace use that folder too. The folder is cleaned with each session's transcript (30 days by default), not by Windows. If you move or rename the workspace, run `install.py` again from the new place, `doctor.py` reports the broken path.
+
+Shell tools (pip, npm, Python's `tempfile`...) then write their temp files to `.lean\tmp` too, and Claude Code cleans only its own session folders. `bootstrap.py` therefore cleans `.lean\tmp` from the session-start hook, at most once a day: anything untouched for `tmp_max_age_days` (default 7, in `.lean\config.json`) is deleted, a folder counts as touched if anything inside it is, and session scratchpads are kept while their chat exists. `python .lean\bootstrap.py --clean-tmp` cleans now, `doctor.py` shows the folder size.
+
+Several workspaces on one machine work: install each one. They share a single caveman copy (the first workspace's; one plugin per machine, or every session would run caveman twice), and each workspace's hook acts only inside its own root. `CLAUDE_CODE_TMPDIR` is one user setting, so only one workspace can host the temp files: the preflight recommends keeping it where it is, and `doctor.py` says which workspace has it.
 
 Plan-mode files are also kept in each project: `bootstrap.py` sets `plansDirectory` to `<project>\.plans` (git-excluded) instead of `~/.claude/plans`.
 
@@ -59,7 +76,7 @@ After installing:
 
 - Open a new session inside the workspace. A brand-new folder is set up by its first session and fully guarded from the second, because Claude Code reads settings at startup, before the hook runs
 - Put project notes in `<project>/CLAUDE.local.md` (`templates/project-CLAUDE.local.md`) and exclude it in `<project>/.git/info/exclude`.
-- After deleting a project: `python forget.py "<path>"`
+- After deleting a project: `python .lean\forget.py "<path>"`
 
 ## Further savings this doesn't automate (for now)
 
@@ -73,6 +90,7 @@ The largest fixed cost is often outside your files:
 ## Limits
 
 - Windows only for now (PowerShell status line, Windows paths)
+- With `--tmp-in-root` and several workspaces, the session scratchpads of every workspace land in the one hosting `CLAUDE_CODE_TMPDIR` (each in its own subfolder). Claude Code always allows writes to the scratchpad, so a second workspace writes inside the first. Use `--tmp-in-root` only with a single workspace
 - Shell commands are not hard-blocked by the perimeter: Claude Code asks before a command that names an outside path, and `CLAUDE.md` tells the agent not to try
 - Claude Code's settings change fast: `doctor.py --live` is the way to know it still works on your version
 

@@ -4,54 +4,62 @@ Bootstrap the workspace guardrails.
 The workspace root is the folder this file lives in. Claude Code does not inherit settings.json from parent folders, so the root, each direct subfolder 
 and every git repo one level deeper get their own .claude/settings.local.json (git-ignored), merged with what is already there:
 
-  - file tools may not read or write outside the workspace root (except folders listed as "unguarded" in .lean.json)
+  - file tools may not read or write outside the workspace root (except folders listed as "unguarded" in .lean/config.json)
   - the root is a working directory everywhere, so projects can read siblings
-  - Claude's auto-memory is off: notes live in each project's CLAUDE.md (unless .lean.json says "auto_memory": true)
+  - Claude's auto-memory is off: notes live in each project's CLAUDE.md (unless .lean/config.json says "auto_memory": true)
   - plan-mode files go to <project>/.plans (git-excluded) instead of ~/.claude/plans
   - the plugins in PLUGINS are enabled
+  - .lean/tmp is kept clean (at most once a day): what shell tools left there and orphan session scratchpads,
+    untouched for tmp_max_age_days (default 7), are deleted
 
 CLAUDE.md, instead, is inherited and lives once at the root.
 
 Usage:
-    python bootstrap.py           apply to every folder
-    python bootstrap.py --check   report only
-    python bootstrap.py --hook    SessionStart hook: reads the hook JSON on stdin, does nothing outside the root, prints a notice only if a folder changed (valid from
+    python .lean/bootstrap.py           apply to every folder
+    python .lean/bootstrap.py --check   report only
+    python .lean/bootstrap.py --clean-tmp   clean .lean/tmp now and report
+    python .lean/bootstrap.py --hook    SessionStart hook: reads the hook JSON on stdin, does nothing outside the root, prints a notice only if a folder changed (valid from
                                   the next session: settings load at startup)
 """
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+LEAN = Path(__file__).resolve().parent   # <root>/.lean holds every file of the framework
+ROOT = LEAN.parent
 ROOT_STR = str(ROOT)
-SKIP = {".git", ".claude", ".plugins", "node_modules", "venv", ".venv", "__pycache__"}
+SKIP = {".git", ".claude", ".lean", ".plugins", "node_modules", "venv", ".venv", "__pycache__"}
+
+def load_config() -> dict:
+    """
+    Choices made by install.py's preflight (<root>/.lean/config.json):
+      auto_memory: true keeps Claude's auto-memory on
+      unguarded:   folders (relative to the root) that legitimately read outside it: no perimeter forced there
+      plugin_dir:  the caveman copy in use; another workspace's when several share one (one plugin per machine)
+    """
+    try:
+        cfg = json.loads((LEAN / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    return {"auto_memory": cfg.get("auto_memory") is True,
+            "unguarded": {u.replace("\\", "/").strip("/").lower() for u in cfg.get("unguarded", [])},
+            "plugin_dir": cfg.get("plugin_dir") or str(LEAN / "plugins" / "caveman")}
+
+
+CONFIG = load_config()
 
 MARKETPLACES = {
-    "caveman-lean": {"source": {"source": "directory", "path": str(ROOT / ".plugins" / "caveman")}},
+    "caveman-lean": {"source": {"source": "directory", "path": CONFIG["plugin_dir"]}},
 }
 PLUGINS = ["caveman@caveman-lean"]
 # Entries from earlier setups, removed from every folder's settings
 STALE_MARKETPLACES: list[str] = []
 STALE_PLUGINS: list[str] = []
-
-
-def load_config() -> dict:
-    """
-    Choices made by install.py's preflight (<root>/.lean.json):
-      auto_memory: true keeps Claude's auto-memory on
-      unguarded:   folders (relative to the root) that legitimately read outside it: no perimeter forced there
-    """
-    try:
-        cfg = json.loads((ROOT / ".lean.json").read_text(encoding="utf-8"))
-    except Exception:
-        cfg = {}
-    return {"auto_memory": cfg.get("auto_memory") is True,
-            "unguarded": {u.replace("\\", "/").strip("/").lower() for u in cfg.get("unguarded", [])}}
-
-
-CONFIG = load_config()
 
 
 def targets() -> list[Path]:
@@ -156,6 +164,61 @@ def apply(folder: Path, check: bool) -> tuple[bool, list[str]]:
     return changed, outside_rules(perms)
 
 
+def newest_mtime(path: Path) -> float:
+    """
+    Latest modification inside `path` (a folder counts as recent if anything in it is), links not followed
+    """
+    latest = path.lstat().st_mtime
+    if path.is_dir() and not path.is_symlink():
+        for dirpath, dirnames, filenames in os.walk(path):
+            for name in dirnames + filenames:
+                try:
+                    latest = max(latest, os.lstat(os.path.join(dirpath, name)).st_mtime)
+                except OSError:
+                    pass
+    return latest
+
+
+def clean_tmp(force: bool = False) -> tuple[int, int]:
+    """
+    Delete what nobody touched for tmp_max_age_days in <root>/.lean/tmp: files shell tools left there (TEMP/TMPDIR point
+    here when CLAUDE_CODE_TMPDIR does) and session scratchpads whose chat no longer exists. Claude Code's own
+    retention keeps cleaning the scratchpads of chats that still exist. Never leaves .lean/tmp.
+    Returns (items removed, bytes freed)
+    """
+    tmp = LEAN / "tmp"
+    stamp = tmp / ".last-clean"
+    if not tmp.is_dir() or (not force and stamp.exists() and time.time() - stamp.stat().st_mtime < 86400):
+        return 0, 0
+    try:
+        days = float(json.loads((LEAN / "config.json").read_text(encoding="utf-8")).get("tmp_max_age_days", 7))
+    except Exception:
+        days = 7.0
+    cutoff = time.time() - days * 86400
+    home = Path(os.environ.get("LEAN_HOME") or Path.home())
+    known = {f.stem for f in (home / ".claude" / "projects").glob("*/*.jsonl")}
+
+    candidates = [p for p in tmp.iterdir() if p.name not in ("claude", ".last-clean")]
+    for project in (tmp / "claude").glob("*"):
+        if project.is_dir():
+            candidates += [s for s in project.iterdir() if s.is_dir() and s.name not in known]
+    removed, freed = 0, 0
+    for item in candidates:
+        try:
+            if newest_mtime(item) >= cutoff:
+                continue
+            size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file()) if item.is_dir() else item.stat().st_size
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            removed, freed = removed + 1, freed + size
+        except OSError:
+            pass   # in use: next time
+    stamp.touch()
+    return removed, freed
+
+
 def hook() -> int:
     """
     SessionStart hook: never fails the session, silent unless it changed something
@@ -168,6 +231,7 @@ def hook() -> int:
         return 0
     try:
         changed = [f.relative_to(ROOT).as_posix() or "." for f in targets() if apply(f, False)[0]]
+        clean_tmp()   # silent: at most once a day
     except Exception as exc:  # report, never block the session
         print(json.dumps({"systemMessage": f"workspace bootstrap failed: {exc}"}))
         return 0
@@ -184,6 +248,10 @@ def main() -> int:
         pass
     if "--hook" in sys.argv:
         return hook()
+    if "--clean-tmp" in sys.argv:
+        n, b = clean_tmp(force=True)
+        print(f"{LEAN / 'tmp'}: {n} item(s) removed, {b / 1048576:.1f} MB freed")
+        return 0
     check = "--check" in sys.argv
     pending = 0
     for folder in targets():
