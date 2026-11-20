@@ -7,6 +7,7 @@ and every git repo one level deeper get their own .claude/settings.local.json (g
   - file tools may not read or write outside the workspace root (except folders listed as "unguarded" in .lean.json)
   - the root is a working directory everywhere, so projects can read siblings
   - Claude's auto-memory is off: notes live in each project's CLAUDE.md (unless .lean.json says "auto_memory": true)
+  - plan-mode files go to <project>/.plans (git-excluded) instead of ~/.claude/plans
   - the plugins in PLUGINS are enabled
 
 CLAUDE.md, instead, is inherited and lives once at the root.
@@ -84,6 +85,26 @@ def outside_rules(perms: dict) -> list[str]:
     return flagged
 
 
+PLANS_DIR = ".plans"
+
+
+def git_exclude(folder: Path, entry: str, check: bool) -> bool:
+    """
+    Keep `entry` out of git in a folder that is a repo (local .git/info/exclude, never committed).
+    True if it was missing
+    """
+    if not (folder / ".git").is_dir():
+        return False
+    exclude = folder / ".git" / "info" / "exclude"
+    current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if entry in current.splitlines():
+        return False
+    if not check:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(current.rstrip("\n") + ("\n" if current.strip() else "") + entry + "\n", encoding="utf-8")
+    return True
+
+
 def apply(folder: Path, check: bool) -> tuple[bool, list[str]]:
     path = folder / ".claude" / "settings.local.json"
     data = {}
@@ -104,6 +125,12 @@ def apply(folder: Path, check: bool) -> tuple[bool, list[str]]:
                 changed = True
     if not CONFIG["auto_memory"] and data.get("autoMemoryEnabled") is not False:
         data["autoMemoryEnabled"] = False
+        changed = True
+    # plan-mode files stay in the project (default is ~/.claude/plans, outside the workspace)
+    if data.get("plansDirectory") != PLANS_DIR:
+        data["plansDirectory"] = PLANS_DIR
+        changed = True
+    if git_exclude(folder, PLANS_DIR + "/", check):
         changed = True
 
     markets = data.setdefault("extraKnownMarketplaces", {})

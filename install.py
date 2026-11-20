@@ -1,7 +1,10 @@
 """
 Install the lean workspace into a folder (Windows, Python 3.9+, git, Node, Claude Code)
 
-    python install.py <workspace-root> [--language English] [--no-caveman] [--dry-run] [--yes] [--choose KEY=VALUE ...]
+    python install.py <workspace-root> [--language English] [--no-caveman] [--tmp-in-root] [--dry-run] [--yes] [--choose KEY=VALUE ...]
+
+    --tmp-in-root   set CLAUDE_CODE_TMPDIR to <root>/.tmp: Claude Code's temp files, session scratchpad included, stay in the
+                    workspace. It is a user setting, so sessions outside the workspace put their temp files there too
 
 First a preflight looks for what an existing setup would clash with, and nothing is changed until every clash has a decision:
 
@@ -127,13 +130,25 @@ def project_cwd(d: Path):
 
 ############################################################ PREFLIGHT ############################################################
 
-def find_conflicts(root: Path, with_caveman: bool) -> tuple[list[dict], list[str], dict]:
+def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[list[dict], list[str], dict]:
     """
     Returns (conflicts needing a decision, notes needing none, facts used later)
     """
     conflicts, notes, facts = [], [], {}
     settings = read_json(CLAUDE / "settings.json")
     saved = read_json(root / ".lean.json")   # decisions of a previous install are not asked again
+
+    if tmp_in_root:
+        current = settings.get("env", {}).get("CLAUDE_CODE_TMPDIR")
+        if current and norm(current) != norm(str(root / ".tmp")):
+            conflicts.append({
+                "key": "tmpdir", "recommended": "replace",
+                "title": f"CLAUDE_CODE_TMPDIR is already set to {current}",
+                "why": "--tmp-in-root moves Claude Code's temp files (session scratchpad included) into <root>/.tmp",
+                "options": {"replace": f"set it to {root / '.tmp'}",
+                            "keep": "keep your value: temp files stay outside the root"}})
+        if os.environ.get("CLAUDE_CODE_TMPDIR"):
+            notes.append("CLAUDE_CODE_TMPDIR is also set in your environment: remove it there if temp files still land outside the root")
 
     if with_caveman:
         others = [k for k, v in settings.get("enabledPlugins", {}).items() if k.startswith("caveman@") and k != PLUGIN and v is True]
@@ -161,7 +176,7 @@ def find_conflicts(root: Path, with_caveman: bool) -> tuple[list[dict], list[str
         mods = plugin_dir / "MODIFICATIONS.md"
         if plugin_dir.exists() and not (mods.exists() and MARKETPLACE in mods.read_text(encoding="utf-8", errors="replace")):
             notes.append(f"{plugin_dir} is not ours: it will be moved to {plugin_dir.name}.bak-<time>")
-        if "statusLine" in settings:
+        if "statusLine" in settings and "caveman-statusline" not in json.dumps(settings["statusLine"]):
             notes.append("you already have a status line: kept, so no [CAVEMAN] badge")
 
     memories = []
@@ -196,9 +211,13 @@ def find_conflicts(root: Path, with_caveman: bool) -> tuple[list[dict], list[str
         for name in ("settings.local.json", "settings.json"):
             perms = read_json(folder / ".claude" / name).get("permissions", {})
             dirs = [d for d in perms.get("additionalDirectories", []) if isinstance(d, str) and not under(d, root)]
+            # only file-tool rules matter: the perimeter blocks file tools, not programs run from the shell
+            def rule_path(r: str) -> str:   # Read(//c/Users/..) -> read(c:/users/..)
+                return re.sub(r"//([a-z])/", r"\1:/", norm(r))
             rules = [r for r in perms.get("allow", []) if isinstance(r, str)
-                     and re.search(r"(//[a-z]/|[a-z]:[\\/])", r.lower()) and norm(str(root)) not in norm(r)
-                     and "appdata/local/temp" not in norm(r)]
+                     and re.match(r"(Read|Edit|Write|Glob|Grep|NotebookEdit)\(", r)
+                     and re.search(r"(^|[^a-z])[a-z]:/", rule_path(r)) and norm(str(root)) not in rule_path(r)
+                     and "appdata/local/temp" not in rule_path(r)]
             rel = folder.relative_to(root).as_posix() or "."
             if (dirs or rules) and rel not in saved.get("readers_decided", []):
                 readers.append(rel)
@@ -259,8 +278,8 @@ def decide(conflicts: list[dict], choices: dict, yes: bool, dry: bool) -> dict:
     return decisions
 
 
-def preflight(root: Path, with_caveman: bool, choices: dict, yes: bool, dry: bool) -> tuple[dict, dict]:
-    conflicts, notes, facts = find_conflicts(root, with_caveman)
+def preflight(root: Path, with_caveman: bool, tmp_in_root: bool, choices: dict, yes: bool, dry: bool) -> tuple[dict, dict]:
+    conflicts, notes, facts = find_conflicts(root, with_caveman, tmp_in_root)
     print("\nPreflight:")
     if not conflicts and not notes:
         print("  nothing clashes with the existing setup")
@@ -380,7 +399,7 @@ def caveman_files(root: Path, decisions: dict, dry: bool) -> Path:
     return dest
 
 
-def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: dict, dry: bool) -> None:
+def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: dict, tmp_in_root: bool, dry: bool) -> None:
     path = CLAUDE / "settings.json"
     if path.exists() and not dry:
         bak = CLAUDE / "backups" / f"settings.json.pre-lean.{int(time.time())}"
@@ -394,6 +413,13 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
     if not any(h.get("command") == cmd for e in ss for h in e.get("hooks", [])):
         ss.append({"hooks": [{"type": "command", "command": cmd, "timeout": 30, "statusMessage": "workspace bootstrap..."}]})
         say("SessionStart hook added")
+
+    if tmp_in_root and decisions.get("tmpdir") != "keep":
+        tmp = root / ".tmp"
+        if not dry:
+            tmp.mkdir(exist_ok=True)
+        d.setdefault("env", {})["CLAUDE_CODE_TMPDIR"] = str(tmp)
+        say(f"CLAUDE_CODE_TMPDIR = {tmp} (temp files and session scratchpads now stay in the root, from the next session)")
 
     if plugin_dir:
         if decisions.get("other_caveman") == "disable":
@@ -429,9 +455,11 @@ def claude_cli(plugin_dir: Path, dry: bool) -> None:
         say(f"claude {' '.join(args[:3])}: {'ok' if r.returncode == 0 else 'FAILED ' + (r.stderr or r.stdout).strip()[:200]}")
 
 
-def save_config(root: Path, decisions: dict, facts: dict, with_caveman: bool, dry: bool) -> None:
+def save_config(root: Path, decisions: dict, facts: dict, with_caveman: bool, tmp_in_root: bool, dry: bool) -> None:
     path = root / ".lean.json"
     cfg = read_json(path)
+    if tmp_in_root:
+        cfg["tmp_in_root"] = decisions.get("tmpdir") != "keep"
     if with_caveman:
         cfg["caveman_scope"] = decisions.get("caveman_scope", cfg.get("caveman_scope", "root"))
     cfg["auto_memory"] = decisions.get("memory") == "keep" if "memory" in decisions else cfg.get("auto_memory", False)
@@ -480,18 +508,20 @@ def main() -> int:
     dry = "--dry-run" in flags
     with_caveman = "--no-caveman" not in flags
     check_root(root)
+    # once chosen, --tmp-in-root sticks: re-runs without the flag keep it
+    tmp_in_root = "--tmp-in-root" in flags or read_json(root / ".lean.json").get("tmp_in_root") is True
     print(f"Workspace root: {root}{'  (dry run: nothing is changed)' if dry else ''}")
 
-    decisions, facts = preflight(root, with_caveman, choices, "--yes" in flags, dry)
+    decisions, facts = preflight(root, with_caveman, tmp_in_root, choices, "--yes" in flags, dry)
 
     copy_tools(root, language, decisions, dry)
     if decisions.get("memory") == "migrate":
         migrate_memories(root, facts["memories"], dry)
     plugin_dir = caveman_files(root, decisions, dry) if with_caveman else None
-    user_settings(root, plugin_dir, decisions, facts, dry)
+    user_settings(root, plugin_dir, decisions, facts, tmp_in_root, dry)
     if plugin_dir and "--no-cli" not in flags:
         claude_cli(plugin_dir, dry)
-    save_config(root, decisions, facts, with_caveman, dry)
+    save_config(root, decisions, facts, with_caveman, tmp_in_root, dry)
     if not dry:
         subprocess.run([sys.executable, str(root / "bootstrap.py")], check=False)
     print(f"\nDone. Check it: python \"{root / 'doctor.py'}\"   (add --live for a real session test)")

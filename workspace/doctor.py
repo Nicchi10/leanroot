@@ -49,7 +49,15 @@ def static() -> None:
     check(cmd in hooks, "SessionStart hook runs this root's bootstrap.py", reinstall)
 
     r = subprocess.run([sys.executable, str(ROOT / "bootstrap.py"), "--check"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    check(r.returncode == 0, "every project folder has the guard settings (bootstrap --check)", f'python "{ROOT / "bootstrap.py"}"')
+    check(r.returncode == 0, "every project folder has the guard settings and .plans (bootstrap --check)", f'python "{ROOT / "bootstrap.py"}"')
+
+    tmpdir = s.get("env", {}).get("CLAUDE_CODE_TMPDIR")
+    if cfg.get("tmp_in_root"):
+        check(isinstance(tmpdir, str) and Path(tmpdir).resolve() == (ROOT / ".tmp").resolve(),
+              "CLAUDE_CODE_TMPDIR points to <root>/.tmp (scratchpads stay in the workspace)", f"{reinstall} --tmp-in-root")
+    if tmpdir:
+        check(Path(tmpdir).is_dir(), f"CLAUDE_CODE_TMPDIR folder exists ({tmpdir})",
+              "the workspace was moved or renamed? re-run install.py from its new place")
 
     root_cfg = ROOT / "CLAUDE.md"
     check(root_cfg.exists(), "CLAUDE.md at the root", "copy templates/CLAUDE.md")
@@ -94,7 +102,15 @@ def live() -> None:
         check(False, "live test needs the claude CLI on PATH")
         return
     inside = ROOT / f"_doctor_{int(time.time())}"
-    outside = Path(tempfile.mkdtemp(prefix="lean_doctor_"))
+    # Not tempfile's default dir: with CLAUDE_CODE_TMPDIR set, Claude Code hands TMPDIR=<root>/.tmp to shell commands,
+    # and tempfile would put the "outside" folder inside the root
+    system_tmp = next((Path(p) for p in (os.environ.get("TEMP"), os.environ.get("TMP"), HOME / "AppData" / "Local" / "Temp")
+                       if p and ROOT not in Path(p).resolve().parents and Path(p).resolve() != ROOT and Path(p).is_dir()), HOME)
+    outside = Path(tempfile.mkdtemp(prefix="lean_doctor_", dir=system_tmp))
+    if ROOT in outside.resolve().parents:
+        check(False, f"live: could not find a folder outside the root for the outside test (got {outside})")
+        shutil.rmtree(outside, ignore_errors=True)
+        return
     try:
         inside.mkdir()
         (inside / "probe.txt").write_text("probe\n", encoding="utf-8")
@@ -102,6 +118,9 @@ def live() -> None:
         run_session(inside)
         check((inside / ".claude" / "settings.local.json").exists(),
               "live: a NEW folder gets the guard settings at its first session (hook ran)")
+        if read_json(ROOT / ".lean.json").get("tmp_in_root"):
+            fresh = [p for p in (ROOT / ".tmp").rglob("*") if p.stat().st_mtime >= start] if (ROOT / ".tmp").exists() else []
+            check(bool(fresh), "live: the session wrote its temp files under <root>/.tmp, not the system temp")
         scope_root = read_json(ROOT / ".lean.json").get("caveman_scope", "root") == "root"
         if (ROOT / ".plugins" / "caveman").exists():
             check("caveman" in new_modes(start), "live: caveman activates in a session inside the root")

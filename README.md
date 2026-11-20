@@ -51,6 +51,10 @@ python "C:\path\to\workspace\doctor.py" --live
 Answer at the prompt, pass `--choose KEY=VALUE`, or `--yes` for every recommended choice. Decisions are saved in `<workspace>/.lean.json` and not asked again. An existing status line is never replaced.
 Other options: `--no-caveman` (perimeter and setup only), `--dry-run` (print, change nothing).
 
+**`--tmp-in-root` (recommended for a complete perimeter):** by default Claude Code keeps its temp files, the session scratchpad included, in the system temp folder (`%TEMP%\claude\...`), outside the workspace. This option sets `CLAUDE_CODE_TMPDIR` to `<workspace>\.tmp`, so they stay inside. Shell commands run by Claude then get the same folder as `TEMP`/`TMPDIR`. It is a user setting: sessions outside the workspace use that folder too. The folder is cleaned with each session's transcript (30 days by default), not by Windows. If you move or rename the workspace, run `install.py` again from the new place, `doctor.py` reports the broken path.
+
+Plan-mode files are also kept in each project: `bootstrap.py` sets `plansDirectory` to `<project>\.plans` (git-excluded) instead of `~/.claude/plans`.
+
 After installing:
 
 - Open a new session inside the workspace. A brand-new folder is set up by its first session and fully guarded from the second, because Claude Code reads settings at startup, before the hook runs

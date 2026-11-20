@@ -14,6 +14,7 @@ Removed, for that folder and everything under it:
   ~/.claude/file-history/<session>   edit checkpoints of those chats
   ~/.claude/session-env/<session>    their saved environments
   ~/.claude/.caveman-sessions + caveman logs   lines of those sessions
+  <temp>/claude/*/<session>          their scratchpads (CLAUDE_CODE_TMPDIR or the system temp)
   ~/.claude/history.jsonl            prompt history (up-arrow) lines
   ~/.claude.json                     "projects" entries, githubRepoPaths
   permission rules naming the folder in ~/.claude/settings.json and in every
@@ -136,6 +137,19 @@ def plan(target: str, raw: Path):
         p = CLAUDE / ".caveman-sessions" / f"{sid}.mode"
         if p.exists():
             acts.append((f"caveman         {p.name}", lambda p=p: p.unlink()))
+
+    # session scratchpads: <temp>/claude/<project-hash>/<session-id>, temp = CLAUDE_CODE_TMPDIR or the system temp
+    try:
+        tmp = json.loads((CLAUDE / "settings.json").read_text(encoding="utf-8")).get("env", {}).get("CLAUDE_CODE_TMPDIR")
+    except Exception:
+        tmp = None
+    bases = {Path(t) / "claude" for t in (tmp, os.environ.get("CLAUDE_CODE_TMPDIR"), os.environ.get("TEMP")) if t}
+    for base in bases:
+        if base.is_dir():
+            for sid in sorted(sessions):
+                for p in base.glob(f"*/{sid}"):
+                    if p.is_dir():
+                        acts.append((f"scratchpad      {p}", lambda p=p: shutil.rmtree(p, ignore_errors=True)))
 
     logs = [(CLAUDE / "history.jsonl", lambda o: under(o.get("project"), target))]
     if sessions:
