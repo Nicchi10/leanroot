@@ -36,7 +36,9 @@ def fetch(dest: Path, ref: str = DEFAULT_REF) -> Path:
     dest = dest.resolve()
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "caveman"
-        subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, UPSTREAM, str(src)], check=True)
+        r = subprocess.run(["git", "-c", "advice.detachedHead=false", "clone", "--quiet", "--depth", "1", "--branch", ref, UPSTREAM, str(src)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode != 0:
+            raise SystemExit(f"git clone failed: {r.stderr.strip()}")
         commit = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
         missing = [s for s in KEEP_SKILLS if not (src / "skills" / s).is_dir()]
         if missing:

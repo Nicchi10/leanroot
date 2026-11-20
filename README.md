@@ -24,9 +24,9 @@ The goal of this repository is to reduce that cost and keep it contained, every 
 | Skills listed by the caveman plugin | 21 skills + 3 agents | 7 skills, 0 agents |
 | caveman plugin on disk | 26 MB | 0.6 MB |
 | Auto-memory section in the system prompt | present | gone |
-| A 16k-token project runbook, rewritten in caveman style | 16,312 tokens | 10,427 tokens (-36%) |
+| A project runbook, rewritten in caveman style | 62,867 bytes | 38,675 bytes (-38%) |
 
-Token counts are `tiktoken` `cl100k_base`. The runbook rewrite was checked mechanically: every number, commit hash and issue reference of the original is still in it. Your numbers will almost certinly differ: run `/context` before and after.
+Sizes are bytes, which do not depend on a tokenizer. The runbook rewrite was checked mechanically: every number, commit hash and issue reference of the original is still in it. To see what these changes cost in tokens on your own setup, run `/context` before and after.
 
 ## Install
 
@@ -38,8 +38,18 @@ python install.py "C:\path\to\workspace" --language English
 python "C:\path\to\workspace\doctor.py" --live
 ```
 
-`install.py` is safe to re-run. It never overwrites an existing `CLAUDE.md` or status line, and it backs up `~/.claude/settings.json` first. 
-Options: `--no-caveman` (perimeter and setup only), `--dry-run` (print, change nothing).
+`install.py` is safe to re-run, and it backs up `~/.claude/settings.json` first. Before changing anything it runs a preflight against your existing setup and stops on every clash until you decide:
+
+| Clash | Choices (recommended first) |
+|---|---|
+| another caveman plugin is enabled | disable it (it stays installed) / abort |
+| caveman is already on outside the workspace | keep it everywhere / workspace only |
+| auto-memories exist for projects in the workspace | migrate them into each project's `CLAUDE.local.md` / keep auto-memory / drop |
+| the workspace already has its own `CLAUDE.md` | append the rules block (marked, refreshed on re-runs) / keep yours untouched |
+| projects already read outside the workspace | leave them unguarded / guard them anyway |
+
+Answer at the prompt, pass `--choose KEY=VALUE`, or `--yes` for every recommended choice. Decisions are saved in `<workspace>/.lean.json` and not asked again. An existing status line is never replaced.
+Other options: `--no-caveman` (perimeter and setup only), `--dry-run` (print, change nothing).
 
 After installing:
 
@@ -61,6 +71,10 @@ The largest fixed cost is often outside your files:
 - Windows only for now (PowerShell status line, Windows paths)
 - Shell commands are not hard-blocked by the perimeter: Claude Code asks before a command that names an outside path, and `CLAUDE.md` tells the agent not to try
 - Claude Code's settings change fast: `doctor.py --live` is the way to know it still works on your version
+
+## License
+
+MIT, see `LICENSE`. Free for personal and commercial use.
 
 ## Credits
 

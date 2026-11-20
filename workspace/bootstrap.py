@@ -4,9 +4,9 @@ Bootstrap the workspace guardrails.
 The workspace root is the folder this file lives in. Claude Code does not inherit settings.json from parent folders, so the root, each direct subfolder 
 and every git repo one level deeper get their own .claude/settings.local.json (git-ignored), merged with what is already there:
 
-  - file tools may not read or write outside the workspace root
+  - file tools may not read or write outside the workspace root (except folders listed as "unguarded" in .lean.json)
   - the root is a working directory everywhere, so projects can read siblings
-  - Claude's auto-memory is off: notes live in each project's CLAUDE.md
+  - Claude's auto-memory is off: notes live in each project's CLAUDE.md (unless .lean.json says "auto_memory": true)
   - the plugins in PLUGINS are enabled
 
 CLAUDE.md, instead, is inherited and lives once at the root.
@@ -34,6 +34,23 @@ PLUGINS = ["caveman@caveman-lean"]
 # Entries from earlier setups, removed from every folder's settings
 STALE_MARKETPLACES: list[str] = []
 STALE_PLUGINS: list[str] = []
+
+
+def load_config() -> dict:
+    """
+    Choices made by install.py's preflight (<root>/.lean.json):
+      auto_memory: true keeps Claude's auto-memory on
+      unguarded:   folders (relative to the root) that legitimately read outside it: no perimeter forced there
+    """
+    try:
+        cfg = json.loads((ROOT / ".lean.json").read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    return {"auto_memory": cfg.get("auto_memory") is True,
+            "unguarded": {u.replace("\\", "/").strip("/").lower() for u in cfg.get("unguarded", [])}}
+
+
+CONFIG = load_config()
 
 
 def targets() -> list[Path]:
@@ -79,11 +96,13 @@ def apply(folder: Path, check: bool) -> tuple[bool, list[str]]:
     if not any(Path(d).resolve() == ROOT for d in dirs):
         dirs.append(ROOT_STR)
         changed = True
-    for key in ("blockReadsOutsideWorkingDirectories", "blockWritesOutsideWorkingDirectories"):
-        if perms.get(key) is not True:
-            perms[key] = True
-            changed = True
-    if data.get("autoMemoryEnabled") is not False:
+    rel = folder.relative_to(ROOT).as_posix().lower()
+    if rel not in CONFIG["unguarded"]:
+        for key in ("blockReadsOutsideWorkingDirectories", "blockWritesOutsideWorkingDirectories"):
+            if perms.get(key) is not True:
+                perms[key] = True
+                changed = True
+    if not CONFIG["auto_memory"] and data.get("autoMemoryEnabled") is not False:
         data["autoMemoryEnabled"] = False
         changed = True
 

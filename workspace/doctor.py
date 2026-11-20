@@ -23,6 +23,7 @@ HOME = Path(os.environ.get("LEAN_HOME") or Path.home())
 APPDATA = Path(os.environ.get("LEAN_APPDATA") or os.environ.get("APPDATA") or HOME / "AppData" / "Roaming")
 CLAUDE = HOME / ".claude"
 PLUGIN = "caveman@caveman-lean"
+MARKER = "<!-- lean-workspace:start -->"
 RESULTS: list[tuple[bool, str]] = []
 
 
@@ -41,12 +42,13 @@ def read_json(path: Path) -> dict:
 
 def static() -> None:
     reinstall = f'python install.py "{ROOT}"'
+    cfg = read_json(ROOT / ".lean.json")
     s = read_json(CLAUDE / "settings.json")
     cmd = f'python "{(ROOT / "bootstrap.py").as_posix()}" --hook'
     hooks = [h.get("command") for e in s.get("hooks", {}).get("SessionStart", []) for h in e.get("hooks", [])]
     check(cmd in hooks, "SessionStart hook runs this root's bootstrap.py", reinstall)
 
-    r = subprocess.run([sys.executable, str(ROOT / "bootstrap.py"), "--check"], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(ROOT / "bootstrap.py"), "--check"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     check(r.returncode == 0, "every project folder has the guard settings (bootstrap --check)", f'python "{ROOT / "bootstrap.py"}"')
 
     root_cfg = ROOT / "CLAUDE.md"
@@ -54,6 +56,8 @@ def static() -> None:
     if root_cfg.exists():
         n = len(root_cfg.read_text(encoding="utf-8").encode())
         check(n <= 2048, f"CLAUDE.md is lean ({n} bytes, budget 2048): it loads in every session", "move project-specific rules into that project's CLAUDE.md")
+        if cfg.get("claude_md") != "keep":
+            check(MARKER in root_cfg.read_text(encoding="utf-8"), "CLAUDE.md contains the workspace rules block", f"{reinstall} --choose claude_md=append")
 
     plugin_dir = ROOT / ".plugins" / "caveman"
     if not plugin_dir.exists():
@@ -61,16 +65,21 @@ def static() -> None:
         return
     check((plugin_dir / ".claude-plugin" / "plugin.json").exists(), "trimmed caveman present", reinstall)
     check(s.get("enabledPlugins", {}).get(PLUGIN) is True, f"{PLUGIN} enabled in user settings", reinstall)
+    others = [k for k, v in s.get("enabledPlugins", {}).items() if k.startswith("caveman@") and k != PLUGIN and v is True]
+    check(not others, "no second caveman plugin enabled (hooks would run twice)", f"{reinstall} --choose other_caveman=disable   (found: {', '.join(others)})")
     check(read_json(ROOT / ".caveman.json").get("defaultMode") == "caveman", "caveman ON in the root", reinstall)
-    check(read_json(APPDATA / "caveman" / "config.json").get("defaultMode") == "off", "caveman OFF outside the root", reinstall)
+    if cfg.get("caveman_scope", "root") == "root":
+        check(read_json(APPDATA / "caveman" / "config.json").get("defaultMode") == "off", "caveman OFF outside the root", reinstall)
+    else:
+        print("[--] caveman scope = everywhere (your choice): outside-root check skipped")
     if shutil.which("claude") and "LEAN_HOME" not in os.environ:
-        r = subprocess.run(["claude", "plugin", "list"], capture_output=True, text=True, shell=os.name == "nt")
+        r = subprocess.run(["claude", "plugin", "list"], capture_output=True, text=True, encoding="utf-8", errors="replace", shell=os.name == "nt")
         listed = PLUGIN in r.stdout and str(plugin_dir).lower() in r.stdout.lower()
         check(listed, f"{PLUGIN} installed from {plugin_dir}", f'claude plugin marketplace add "{plugin_dir}" && claude plugin install {PLUGIN}')
 
 
 def run_session(cwd: Path) -> None:
-    subprocess.run(["claude", "-p", "--model", "haiku", "Reply only: ok"], cwd=cwd, capture_output=True, text=True, timeout=240, shell=os.name == "nt")
+    subprocess.run(["claude", "-p", "--model", "haiku", "Reply only: ok"], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240, shell=os.name == "nt")
 
 
 def new_modes(since: float) -> list[str]:
@@ -93,8 +102,10 @@ def live() -> None:
         run_session(inside)
         check((inside / ".claude" / "settings.local.json").exists(),
               "live: a NEW folder gets the guard settings at its first session (hook ran)")
+        scope_root = read_json(ROOT / ".lean.json").get("caveman_scope", "root") == "root"
         if (ROOT / ".plugins" / "caveman").exists():
             check("caveman" in new_modes(start), "live: caveman activates in a session inside the root")
+        if (ROOT / ".plugins" / "caveman").exists() and scope_root:
             start = time.time() - 1
             (outside / "probe.txt").write_text("probe\n", encoding="utf-8")
             run_session(outside)
@@ -103,7 +114,7 @@ def live() -> None:
         shutil.rmtree(inside, ignore_errors=True)
         shutil.rmtree(outside, ignore_errors=True)
         for folder in (inside, outside):   # leave no trace of the test sessions
-            subprocess.run([sys.executable, str(ROOT / "forget.py"), str(folder), "--yes"], capture_output=True, text=True)
+            subprocess.run([sys.executable, str(ROOT / "forget.py"), str(folder), "--yes"], capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def main() -> int:
