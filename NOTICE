@@ -1,0 +1,13 @@
+This project does not include caveman's source code. `fetch_caveman.py`
+downloads it at install time from its official repository and keeps only part
+of it, on the user's machine.
+
+Caveman
+Copyright 2026 Julius Brussee
+https://github.com/juliusbrussee/caveman
+Licensed under the Apache License, Version 2.0.
+
+The trimmed local copy keeps caveman's own LICENSE and NOTICE files, and its
+MODIFICATIONS.md lists what was removed or changed (Apache-2.0, section 4).
+"caveman" is a name of the upstream project; this project is not affiliated
+with or endorsed by it.
