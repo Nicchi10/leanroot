@@ -1,7 +1,26 @@
-# Lean workspace for Claude Code
+<p align="center">
+  <img src="images/logo.png" alt="leanroot - a lean, fenced workspace for AI coding agents" width="200" />
+</p>
 
-A folder where every Claude Code session starts small, stays inside its walls
-and leaves no clutter behind.
+<h1 align="center">leanroot</h1>
+
+<p align="center">
+  <em>A folder where every Claude Code session starts small, stays inside its walls and leaves no clutter behind.</em>
+</p>
+
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows-5b21b6" alt="Platform: Windows" />
+  <img src="https://img.shields.io/badge/python-3.9%2B-5b21b6" alt="Python 3.9+" />
+  <img src="https://img.shields.io/badge/for-Claude_Code-5b21b6" alt="For Claude Code" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/CLAUDE.md-%E2%88%9262%25-22d3ee?labelColor=2e1065" alt="Root CLAUDE.md 62% smaller" />
+  <img src="https://img.shields.io/badge/plugin_skills-24_%E2%86%92_7-22d3ee?labelColor=2e1065" alt="Plugin skills and agents from 24 to 7" />
+  <img src="https://img.shields.io/badge/caveman_on_disk-26_MB_%E2%86%92_0.6_MB-22d3ee?labelColor=2e1065" alt="caveman plugin from 26 MB to 0.6 MB" />
+  <img src="https://img.shields.io/badge/auto--memory-off-22d3ee?labelColor=2e1065" alt="Auto-memory off" />
+</p>
 
 Every session incurs a cost even before anything is launched, due to everything that gets loaded at startup instructions, memory, descriptions, plugins, and so on. The issue is that much of this material is never actually used.
 The goal of this repository is to reduce that cost and keep it contained, every statement provided below is based on concrete, documented measurements.
