@@ -1,7 +1,7 @@
 """
 Check that the lean workspace is really in force.
 
-    python .lean/doctor.py          static checks (free)
+    python .lean/doctor.py          static checks (free; python3 on macOS)
     python .lean/doctor.py --live   also opens two real Claude sessions (Haiku, a few cents): one inside the root, one outside, and
                               checks what their hooks actually did
 
@@ -20,9 +20,10 @@ from pathlib import Path
 
 LEAN = Path(__file__).resolve().parent   # <root>/.lean
 ROOT = LEAN.parent
+WIN = os.name == "nt"
 HOME = Path(os.environ.get("LEAN_HOME") or Path.home())
-APPDATA = Path(os.environ.get("LEAN_APPDATA") or os.environ.get("APPDATA") or HOME / "AppData" / "Roaming")
 CLAUDE = HOME / ".claude"
+PY = "python" if WIN else "python3"
 PLUGIN = "caveman@caveman-lean"
 MARKER = "<!-- lean-workspace:start -->"
 RESULTS: list[tuple[bool, str]] = []
@@ -41,6 +42,19 @@ def read_json(path: Path) -> dict:
         return {}
 
 
+def caveman_config() -> Path:
+    """
+    caveman's user config (same lookup as its hooks): $XDG_CONFIG_HOME, else %APPDATA% on Windows, else ~/.config
+    """
+    if os.environ.get("LEAN_APPDATA"):   # tests only
+        return Path(os.environ["LEAN_APPDATA"]) / "caveman" / "config.json"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return Path(os.environ["XDG_CONFIG_HOME"]) / "caveman" / "config.json"
+    if WIN:
+        return Path(os.environ.get("APPDATA") or HOME / "AppData" / "Roaming") / "caveman" / "config.json"
+    return HOME / ".config" / "caveman" / "config.json"
+
+
 def plugin_path() -> Path:
     """
     The caveman copy this workspace uses: its own, or the one it shares with another workspace (config plugin_dir)
@@ -49,15 +63,15 @@ def plugin_path() -> Path:
 
 
 def static() -> None:
-    reinstall = f'python install.py "{ROOT}"'
+    reinstall = f'{PY} install.py "{ROOT}"'
     cfg = read_json(LEAN / "config.json")
     s = read_json(CLAUDE / "settings.json")
-    cmd = f'python "{(LEAN / "bootstrap.py").as_posix()}" --hook'
+    cmd = f'{PY} "{(LEAN / "bootstrap.py").as_posix()}" --hook'
     hooks = [h.get("command") for e in s.get("hooks", {}).get("SessionStart", []) for h in e.get("hooks", [])]
     check(cmd in hooks, "SessionStart hook runs this root's bootstrap.py", reinstall)
 
     r = subprocess.run([sys.executable, str(LEAN / "bootstrap.py"), "--check"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    check(r.returncode == 0, "every project folder has the guard settings and .plans (bootstrap --check)", f'python "{LEAN / "bootstrap.py"}"')
+    check(r.returncode == 0, "every project folder has the guard settings and .plans (bootstrap --check)", f'{PY} "{LEAN / "bootstrap.py"}"')
 
     tmpdir = s.get("env", {}).get("CLAUDE_CODE_TMPDIR")
     if cfg.get("tmp_in_root"):
@@ -69,7 +83,7 @@ def static() -> None:
     tmp = LEAN / "tmp"
     if tmp.is_dir():
         size = sum(f.stat().st_size for f in tmp.rglob("*") if f.is_file())
-        print(f"[--] {tmp}: {size / 1048576:.1f} MB (cleaned daily of items older than tmp_max_age_days; now: python .lean/bootstrap.py --clean-tmp)")
+        print(f"[--] {tmp}: {size / 1048576:.1f} MB (cleaned daily of items older than tmp_max_age_days; now: {PY} .lean/bootstrap.py --clean-tmp)")
     if tmpdir:
         check(Path(tmpdir).is_dir(), f"CLAUDE_CODE_TMPDIR folder exists ({tmpdir})",
               "the workspace was moved or renamed? re-run install.py from its new place")
@@ -92,7 +106,7 @@ def static() -> None:
     check(not others, "no second caveman plugin enabled (hooks would run twice)", f"{reinstall} --choose other_caveman=disable   (found: {', '.join(others)})")
     check(read_json(ROOT / ".caveman.json").get("defaultMode") == "caveman", "caveman ON in the root", reinstall)
     if cfg.get("caveman_scope", "root") == "root":
-        check(read_json(APPDATA / "caveman" / "config.json").get("defaultMode") == "off", "caveman OFF outside the root", reinstall)
+        check(read_json(caveman_config()).get("defaultMode") == "off", "caveman OFF outside the root", reinstall)
     else:
         print("[--] caveman scope = everywhere (your choice): outside-root check skipped")
     if shutil.which("claude") and "LEAN_HOME" not in os.environ:
@@ -119,7 +133,9 @@ def live() -> None:
     inside = ROOT / f"_doctor_{int(time.time())}"
     # Not tempfile's default dir: with CLAUDE_CODE_TMPDIR set, Claude Code hands TMPDIR=<root>/.lean/tmp to shell commands,
     # and tempfile would put the "outside" folder inside the root
-    system_tmp = next((Path(p) for p in (os.environ.get("TEMP"), os.environ.get("TMP"), HOME / "AppData" / "Local" / "Temp")
+    candidates = (os.environ.get("TEMP"), os.environ.get("TMP"), HOME / "AppData" / "Local" / "Temp") if WIN else \
+                 (os.environ.get("TMPDIR"), "/tmp")
+    system_tmp = next((Path(p) for p in candidates
                        if p and ROOT not in Path(p).resolve().parents and Path(p).resolve() != ROOT and Path(p).is_dir()), HOME)
     outside = Path(tempfile.mkdtemp(prefix="lean_doctor_", dir=system_tmp))
     if ROOT in outside.resolve().parents:

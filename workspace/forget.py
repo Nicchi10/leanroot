@@ -14,14 +14,14 @@ Removed, for that folder and everything under it:
   ~/.claude/file-history/<session>   edit checkpoints of those chats
   ~/.claude/session-env/<session>    their saved environments
   ~/.claude/.caveman-sessions + caveman logs   lines of those sessions
-  <temp>/claude/*/<session>          their scratchpads (CLAUDE_CODE_TMPDIR or the system temp)
+  <temp>/claude*/*/<session>         their scratchpads (CLAUDE_CODE_TMPDIR or the system temp)
   ~/.claude/history.jsonl            prompt history (up-arrow) lines
   ~/.claude.json                     "projects" entries, githubRepoPaths
   permission rules naming the folder in ~/.claude/settings.json and in every
   .claude/settings.local.json under the workspace root
 
 ~/.claude.json is backed up to ~/.claude/backups first. Everything else is
-deleted for good (no Recycle Bin).
+deleted for good (no Recycle Bin / Trash). On macOS run it with python3.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ import sys
 import time
 from pathlib import Path
 
+WIN = os.name == "nt"
 HOME = Path(os.environ.get("LEAN_HOME") or Path.home())   # LEAN_HOME: tests only
 CLAUDE = HOME / ".claude"
 LEAN = Path(__file__).resolve().parent   # <root>/.lean
@@ -41,8 +42,10 @@ BS = chr(92)
 
 
 def norm(p: str) -> str:
-    """Comparable form of a Windows path: lower case, forward slashes, no trailing slash."""
+    """Comparable form of a path: lower case, forward slashes, no trailing slash (macOS: //Users -> /Users)."""
     s = p.replace(BS + BS, "/").replace(BS, "/").strip().rstrip("/").lower()
+    if not WIN:
+        return re.sub(r"^//+", "/", s)
     s = re.sub(r"^//([a-z])/", r"\1:/", s)   # //c/Users -> c:/users (permission rules)
     s = re.sub(r"^/([a-z])/", r"\1:/", s)    # /c/Users  -> c:/users (git bash)
     return s
@@ -59,7 +62,10 @@ def mentions(rule: str, target: str) -> bool:
     """
     Does a permission rule name the target folder or something under it?
     """
-    t = norm(rule).replace("//" + target[0] + "/", target[0] + ":/").replace("/" + target[0] + "/", target[0] + ":/")
+    if WIN:
+        t = norm(rule).replace("//" + target[0] + "/", target[0] + ":/").replace("/" + target[0] + "/", target[0] + ":/")
+    else:   # Read(//Users/x/..) and Read(~/x/..)
+        t = norm(rule).replace("(~/", "(" + norm(str(HOME)) + "/")
     start = t.find(target)
     while start != -1:
         end = start + len(target)
@@ -139,13 +145,17 @@ def plan(target: str, raw: Path):
         if p.exists():
             acts.append((f"caveman         {p.name}", lambda p=p: p.unlink()))
 
-    # session scratchpads: <temp>/claude/<project-hash>/<session-id>, temp = CLAUDE_CODE_TMPDIR or the system temp
+    # session scratchpads: <temp>/claude/<project-hash>/<session-id> (macOS: <temp>/claude-<uid>/...),
+    # temp = CLAUDE_CODE_TMPDIR or the system temp
     try:
         tmp = json.loads((CLAUDE / "settings.json").read_text(encoding="utf-8")).get("env", {}).get("CLAUDE_CODE_TMPDIR")
     except Exception:
         tmp = None
-    bases = {Path(t) / "claude" for t in (tmp, os.environ.get("CLAUDE_CODE_TMPDIR"), os.environ.get("TEMP")) if t}
-    for base in bases:
+    temps = {Path(t) for t in (tmp, os.environ.get("CLAUDE_CODE_TMPDIR"), os.environ.get("TEMP"), os.environ.get("TMPDIR"),
+                               None if WIN else "/tmp") if t}
+    bases = {b.resolve() for t in temps if t.is_dir() for b in t.glob("claude*")
+             if b.is_dir() and (b.name == "claude" or b.name.startswith("claude-"))}
+    for base in sorted(bases):
         if base.is_dir():
             for sid in sorted(sessions):
                 for p in base.glob(f"*/{sid}"):

@@ -15,7 +15,7 @@ and every git repo one level deeper get their own .claude/settings.local.json (g
 CLAUDE.md, instead, is inherited and lives once at the root.
 
 Usage:
-    python .lean/bootstrap.py           apply to every folder
+    python .lean/bootstrap.py           apply to every folder (python3 on macOS)
     python .lean/bootstrap.py --check   report only
     python .lean/bootstrap.py --clean-tmp   clean .lean/tmp now and report
     python .lean/bootstrap.py --hook    SessionStart hook: reads the hook JSON on stdin, does nothing outside the root, prints a notice only if a folder changed (valid from
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -34,6 +35,7 @@ LEAN = Path(__file__).resolve().parent   # <root>/.lean holds every file of the 
 ROOT = LEAN.parent
 ROOT_STR = str(ROOT)
 SKIP = {".git", ".claude", ".lean", ".plugins", "node_modules", "venv", ".venv", "__pycache__"}
+WIN = os.name == "nt"
 
 def load_config() -> dict:
     """
@@ -83,6 +85,8 @@ def outside_rules(perms: dict) -> list[str]:
     """
     Allow rules naming an absolute user path outside the root (review by hand)
     """
+    if not WIN:
+        return [r for r in perms.get("allow", []) if isinstance(r, str) and outside_posix(r)]
     flagged = []
     needle = ROOT_STR.lower().replace("\\", "/")
     for rule in perms.get("allow", []):
@@ -91,6 +95,29 @@ def outside_rules(perms: dict) -> list[str]:
         if ":/users/" in low and needle not in low and "/appdata/local/temp/claude" not in low:
             flagged.append(rule)
     return flagged
+
+
+def outside_posix(rule: str) -> bool:
+    """
+    macOS: a rule naming //abs/path or ~/path outside the root (/path is relative to the settings file).
+    Claude Code temp folders do not count
+    """
+    m = re.search(r"\((//|~/)([^)]*)\)", rule)
+    if not m:
+        return False
+    home = Path(os.environ.get("LEAN_HOME") or Path.home())
+    path = ("/" + m.group(2)) if m.group(1) == "//" else str(home / m.group(2))
+    low, root = path.lower().rstrip("/"), ROOT_STR.lower()
+    if low == root or low.startswith(root + "/"):
+        return False
+    return not re.match(r"/(private/)?(tmp/claude|var/folders/)", low)
+
+
+def claude_tmp_dirs(tmp: Path) -> list[Path]:
+    """
+    Claude Code's own folders inside a temp dir: claude (Windows) or claude-<uid> (macOS)
+    """
+    return [p for p in tmp.glob("claude*") if p.is_dir() and (p.name == "claude" or p.name.startswith("claude-"))]
 
 
 PLANS_DIR = ".plans"
@@ -198,8 +225,9 @@ def clean_tmp(force: bool = False) -> tuple[int, int]:
     home = Path(os.environ.get("LEAN_HOME") or Path.home())
     known = {f.stem for f in (home / ".claude" / "projects").glob("*/*.jsonl")}
 
-    candidates = [p for p in tmp.iterdir() if p.name not in ("claude", ".last-clean")]
-    for project in (tmp / "claude").glob("*"):
+    own = claude_tmp_dirs(tmp)
+    candidates = [p for p in tmp.iterdir() if p not in own and p.name != ".last-clean"]
+    for project in (q for d in own for q in d.glob("*")):
         if project.is_dir():
             candidates += [s for s in project.iterdir() if s.is_dir() and s.name not in known]
     removed, freed = 0, 0

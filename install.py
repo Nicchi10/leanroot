@@ -1,5 +1,5 @@
 """
-Install the lean workspace into a folder (Windows, Python 3.9+, git, Node, Claude Code)
+Install the lean workspace into a folder (Windows or macOS, Python 3.9+, git, Node, Claude Code)
 
     python install.py <workspace-root> [--language English] [--no-caveman] [--tmp-in-root] [--dry-run] [--yes] [--choose KEY=VALUE ...]
 
@@ -17,7 +17,7 @@ First a preflight looks for what an existing setup would clash with, and nothing
 Decisions come from --choose KEY=VALUE, from the prompt when run in a terminal, or --yes takes every recommended one.
 They are saved in <root>/.lean/config.json, which bootstrap.py and doctor.py read.
 
-Everything the framework adds lives in <root>/.lean (hidden on Windows), except CLAUDE.md and .caveman.json, which must sit
+Everything the framework adds lives in <root>/.lean (hidden: dot name, plus the hidden attribute on Windows), except CLAUDE.md and .caveman.json, which must sit
 in the root to be found. A flat layout from an older install (tools, .lean.json, .plugins, .tmp in the root) is migrated.
 
 Then, in order (it is safe to re-run):
@@ -29,7 +29,7 @@ Then, in order (it is safe to re-run):
   5. registers and installs the plugin with the `claude` CLI
   6. runs bootstrap.py once
 
-Then: python <root>/.lean/doctor.py
+Then: python <root>/.lean/doctor.py   (python3 on macOS)
 """
 from __future__ import annotations
 
@@ -43,9 +43,10 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+WIN = os.name == "nt"
 HOME = Path(os.environ.get("LEAN_HOME") or Path.home())          # LEAN_HOME / LEAN_APPDATA: tests only
-APPDATA = Path(os.environ.get("LEAN_APPDATA") or os.environ.get("APPDATA") or HOME / "AppData" / "Roaming")
 CLAUDE = HOME / ".claude"
+PY = "python" if WIN else "python3"   # macOS ships python3 only
 TOOLS = ["bootstrap.py", "forget.py", "doctor.py"]
 PLUGIN = "caveman@caveman-lean"
 MARKETPLACE = "caveman-lean"
@@ -72,12 +73,25 @@ def saved_config(root: Path) -> dict:
     return read_json(config_path(root)) or read_json(root / ".lean.json")
 
 
+def caveman_config() -> Path:
+    """
+    caveman's user config, where its hooks look for defaultMode: $XDG_CONFIG_HOME, else %APPDATA% on Windows, else ~/.config
+    """
+    if os.environ.get("LEAN_APPDATA"):
+        return Path(os.environ["LEAN_APPDATA"]) / "caveman" / "config.json"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return Path(os.environ["XDG_CONFIG_HOME"]) / "caveman" / "config.json"
+    if WIN:
+        return Path(os.environ.get("APPDATA") or HOME / "AppData" / "Roaming") / "caveman" / "config.json"
+    return HOME / ".config" / "caveman" / "config.json"
+
+
 def hook_command(root: Path) -> str:
-    return f'python "{(lean(root) / "bootstrap.py").as_posix()}" --hook'
+    return f'{PY} "{(lean(root) / "bootstrap.py").as_posix()}" --hook'
 
 
 def legacy_hook_command(root: Path) -> str:
-    return f'python "{(root / "bootstrap.py").as_posix()}" --hook'
+    return f'{PY} "{(root / "bootstrap.py").as_posix()}" --hook'
 
 
 def say(msg: str) -> None:
@@ -102,11 +116,34 @@ def write_json(path: Path, data: dict, dry: bool) -> None:
 
 def norm(p: str) -> str:
     """
-    Comparable Windows path: lower case, forward slashes, no trailing slash, //c/ and /c/ turned into c:/
+    Comparable path: lower case, forward slashes, no trailing slash.
+    Windows: //c/ and /c/ turned into c:/. macOS (case-insensitive by default): //Users turned into /Users
     """
     s = p.replace("\\\\", "/").replace("\\", "/").strip().rstrip("/").lower()
+    if not WIN:
+        return re.sub(r"^//+", "/", s)
     s = re.sub(r"^//([a-z])/", r"\1:/", s)
     return re.sub(r"^/([a-z])/", r"\1:/", s)
+
+
+def outside_rule(rule, root: Path) -> bool:
+    """
+    A file-tool allow rule naming an absolute path outside the root (the perimeter blocks file tools, not programs run
+    from the shell). Claude Code temp folders do not count
+    """
+    m = isinstance(rule, str) and re.match(r"(Read|Edit|Write|Glob|Grep|NotebookEdit)\((.*)\)$", rule, flags=re.S)
+    if not m:
+        return False
+    path = m.group(2)
+    if WIN:   # Read(//c/Users/..) -> read(c:/users/..)
+        p = re.sub(r"//([a-z])/", r"\1:/", norm(rule))
+        return bool(re.search(r"(^|[^a-z])[a-z]:/", p)) and norm(str(root)) not in p and "appdata/local/temp" not in p
+    if path.startswith("~/"):
+        path = str(HOME) + path[1:]
+    elif not path.startswith("//"):
+        return False   # /path is relative to the settings file, no slash relative to the cwd
+    p = norm(path)
+    return not under(p, root) and not re.match(r"/(private/)?(tmp/claude|var/folders/)", p)
 
 
 def under(path, root: Path) -> bool:
@@ -194,7 +231,7 @@ def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[l
                 "options": {"disable": "disable it in ~/.claude/settings.json (it stays installed; re-enable any time)", 
                             "abort": "stop here and change nothing"}})
 
-        mode = read_json(APPDATA / "caveman" / "config.json").get("defaultMode")
+        mode = read_json(caveman_config()).get("defaultMode")
         if mode not in (None, "off") and "caveman_scope" not in saved:
             conflicts.append({
                 "key": "caveman_scope", "recommended": "everywhere",
@@ -244,13 +281,7 @@ def find_conflicts(root: Path, with_caveman: bool, tmp_in_root: bool) -> tuple[l
         for name in ("settings.local.json", "settings.json"):
             perms = read_json(folder / ".claude" / name).get("permissions", {})
             dirs = [d for d in perms.get("additionalDirectories", []) if isinstance(d, str) and not under(d, root)]
-            # only file-tool rules matter: the perimeter blocks file tools, not programs run from the shell
-            def rule_path(r: str) -> str:   # Read(//c/Users/..) -> read(c:/users/..)
-                return re.sub(r"//([a-z])/", r"\1:/", norm(r))
-            rules = [r for r in perms.get("allow", []) if isinstance(r, str)
-                     and re.match(r"(Read|Edit|Write|Glob|Grep|NotebookEdit)\(", r)
-                     and re.search(r"(^|[^a-z])[a-z]:/", rule_path(r)) and norm(str(root)) not in rule_path(r)
-                     and "appdata/local/temp" not in rule_path(r)]
+            rules = [r for r in perms.get("allow", []) if outside_rule(r, root)]
             rel = folder.relative_to(root).as_posix() or "."
             if (dirs or rules) and rel not in saved.get("readers_decided", []):
                 readers.append(rel)
@@ -442,7 +473,7 @@ def caveman_files(root: Path, decisions: dict, dry: bool) -> Path:
         backup(root / ".caveman.json", dry)
         write_json(root / ".caveman.json", {"defaultMode": "caveman"}, dry)
     say("caveman ON inside the root (.caveman.json)")
-    cfg_path = APPDATA / "caveman" / "config.json"
+    cfg_path = caveman_config()
     if decisions.get("caveman_scope") == "everywhere":
         say(f"caveman left as you had it outside the root ({cfg_path})")
         return dest
@@ -491,15 +522,20 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
         d.setdefault("extraKnownMarketplaces", {})[MARKETPLACE] = {"source": {"source": "directory", "path": str(plugin_dir)}}
         d.setdefault("enabledPlugins", {})[PLUGIN] = True
         say(f"plugin {PLUGIN} enabled")
-        script = plugin_dir / "src" / "hooks" / "caveman-statusline.ps1"
-        stable = CLAUDE / "hooks" / "caveman-statusline.ps1"
+        name = "caveman-statusline.ps1" if WIN else "caveman-statusline.sh"
+        script = plugin_dir / "src" / "hooks" / name
+        stable = CLAUDE / "hooks" / name
         if "statusLine" in d:
             say("you already have a statusLine: left untouched")
         elif script.exists() or dry:
             if not dry:
                 stable.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(script, stable)
-            d["statusLine"] = {"type": "command", "command": f'powershell -NoProfile -ExecutionPolicy Bypass -File "{stable.as_posix()}"'}
+                if not WIN:
+                    stable.chmod(0o755)
+            line = (f'powershell -NoProfile -ExecutionPolicy Bypass -File "{stable.as_posix()}"' if WIN
+                    else f'bash "{stable.as_posix()}"')
+            d["statusLine"] = {"type": "command", "command": line}
             say("caveman status line set")
     write_json(path, d, dry)
 
@@ -587,9 +623,10 @@ def migrate_flat_layout(root: Path, plugin_dir) -> None:
 
 def hide(root: Path) -> None:
     """
-    Windows: hide the framework's own entries so the root shows only projects (and CLAUDE.md)
+    Windows: hide the framework's own entries so the root shows only projects (and CLAUDE.md).
+    macOS: nothing to do, dot names are already hidden in Finder and ls
     """
-    if os.name != "nt":
+    if not WIN:
         return
     for name in (LEAN, ".caveman.json", ".claude"):
         target = root / name
@@ -647,7 +684,7 @@ def main() -> int:
         migrate_flat_layout(root, plugin_dir)
         hide(root)
         subprocess.run([sys.executable, str(lean(root) / "bootstrap.py")], check=False)
-    print(f"\nDone. Check it: python \"{lean(root) / 'doctor.py'}\"   (add --live for a real session test)")
+    print(f"\nDone. Check it: {PY} \"{lean(root) / 'doctor.py'}\"   (add --live for a real session test)")
     return 0
 
 
