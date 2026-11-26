@@ -1,5 +1,5 @@
 """
-Install the lean workspace into a folder (Windows or macOS, Python 3.9+, git, Node, Claude Code)
+Install the lean workspace into a folder (Windows, macOS or Linux, Python 3.9+, git, Node, Claude Code)
 
     python install.py <workspace-root> [--language English] [--no-caveman] [--tmp-in-root] [--dry-run] [--yes] [--choose KEY=VALUE ...]
 
@@ -21,7 +21,7 @@ Everything the framework adds lives in <root>/.lean (hidden: dot name, plus the 
 in the root to be found. A flat layout from an older install (tools, .lean.json, .plugins, .tmp in the root) is migrated.
 
 Then, in order (it is safe to re-run):
-  1. copies bootstrap.py, forget.py, doctor.py into <root>/.lean; writes or extends CLAUDE.md as decided
+  1. copies lean_os.py, bootstrap.py, forget.py, doctor.py into <root>/.lean; writes or extends CLAUDE.md as decided
   2. migrates auto-memories into each project's CLAUDE.local.md, if decided
   3. fetches a trimmed caveman into <root>/.lean/plugins/caveman (fetch_caveman.py)
   4. ~/.claude/settings.json (backed up first): SessionStart hook running bootstrap.py, the local marketplace + plugin,
@@ -29,7 +29,7 @@ Then, in order (it is safe to re-run):
   5. registers and installs the plugin with the `claude` CLI
   6. runs bootstrap.py once
 
-Then: python <root>/.lean/doctor.py   (python3 on macOS)
+Then: python <root>/.lean/doctor.py   (python3 on macOS / Linux)
 """
 from __future__ import annotations
 
@@ -43,11 +43,11 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WIN = os.name == "nt"
-HOME = Path(os.environ.get("LEAN_HOME") or Path.home())          # LEAN_HOME / LEAN_APPDATA: tests only
-CLAUDE = HOME / ".claude"
-PY = "python" if WIN else "python3"   # macOS ships python3 only
-TOOLS = ["bootstrap.py", "forget.py", "doctor.py"]
+sys.path.insert(0, str(HERE / "workspace"))
+sys.dont_write_bytecode = True
+from lean_os import CLAUDE, HOME, PY, caveman_config, hide, norm, outside_rule, statusline_command, statusline_script, under  # noqa: E402
+
+TOOLS = ["lean_os.py", "bootstrap.py", "forget.py", "doctor.py"]   # lean_os first: the others import it
 PLUGIN = "caveman@caveman-lean"
 MARKETPLACE = "caveman-lean"
 MARK_START = "<!-- lean-workspace:start -->"
@@ -73,25 +73,19 @@ def saved_config(root: Path) -> dict:
     return read_json(config_path(root)) or read_json(root / ".lean.json")
 
 
-def caveman_config() -> Path:
-    """
-    caveman's user config, where its hooks look for defaultMode: $XDG_CONFIG_HOME, else %APPDATA% on Windows, else ~/.config
-    """
-    if os.environ.get("LEAN_APPDATA"):
-        return Path(os.environ["LEAN_APPDATA"]) / "caveman" / "config.json"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        return Path(os.environ["XDG_CONFIG_HOME"]) / "caveman" / "config.json"
-    if WIN:
-        return Path(os.environ.get("APPDATA") or HOME / "AppData" / "Roaming") / "caveman" / "config.json"
-    return HOME / ".config" / "caveman" / "config.json"
-
-
 def hook_command(root: Path) -> str:
     return f'{PY} "{(lean(root) / "bootstrap.py").as_posix()}" --hook'
 
 
-def legacy_hook_command(root: Path) -> str:
-    return f'{PY} "{(root / "bootstrap.py").as_posix()}" --hook'
+def stale_hook(command, root: Path) -> bool:
+    """
+    A SessionStart hook of an earlier install of this root: flat layout (bootstrap.py in the root) or another interpreter
+    (python before python3 on macOS / Linux)
+    """
+    if not isinstance(command, str) or command == hook_command(root):
+        return False
+    ends = [f'"{(lean(root) / "bootstrap.py").as_posix()}" --hook', f'"{(root / "bootstrap.py").as_posix()}" --hook']
+    return any(command.endswith(e) for e in ends)
 
 
 def say(msg: str) -> None:
@@ -112,45 +106,6 @@ def write_json(path: Path, data: dict, dry: bool) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
-def norm(p: str) -> str:
-    """
-    Comparable path: lower case, forward slashes, no trailing slash.
-    Windows: //c/ and /c/ turned into c:/. macOS (case-insensitive by default): //Users turned into /Users
-    """
-    s = p.replace("\\\\", "/").replace("\\", "/").strip().rstrip("/").lower()
-    if not WIN:
-        return re.sub(r"^//+", "/", s)
-    s = re.sub(r"^//([a-z])/", r"\1:/", s)
-    return re.sub(r"^/([a-z])/", r"\1:/", s)
-
-
-def outside_rule(rule, root: Path) -> bool:
-    """
-    A file-tool allow rule naming an absolute path outside the root (the perimeter blocks file tools, not programs run
-    from the shell). Claude Code temp folders do not count
-    """
-    m = isinstance(rule, str) and re.match(r"(Read|Edit|Write|Glob|Grep|NotebookEdit)\((.*)\)$", rule, flags=re.S)
-    if not m:
-        return False
-    path = m.group(2)
-    if WIN:   # Read(//c/Users/..) -> read(c:/users/..)
-        p = re.sub(r"//([a-z])/", r"\1:/", norm(rule))
-        return bool(re.search(r"(^|[^a-z])[a-z]:/", p)) and norm(str(root)) not in p and "appdata/local/temp" not in p
-    if path.startswith("~/"):
-        path = str(HOME) + path[1:]
-    elif not path.startswith("//"):
-        return False   # /path is relative to the settings file, no slash relative to the cwd
-    p = norm(path)
-    return not under(p, root) and not re.match(r"/(private/)?(tmp/claude|var/folders/)", p)
-
-
-def under(path, root: Path) -> bool:
-    if not isinstance(path, str):
-        return False
-    p, r = norm(path), norm(str(root))
-    return p == r or p.startswith(r + "/")
 
 
 def check_root(root: Path) -> None:
@@ -495,12 +450,11 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
 
     cmd = hook_command(root)
     ss = d.setdefault("hooks", {}).setdefault("SessionStart", [])
-    old = legacy_hook_command(root)
     for e in ss:
-        kept = [h for h in e.get("hooks", []) if h.get("command") != old]
+        kept = [h for h in e.get("hooks", []) if not stale_hook(h.get("command"), root)]
         if len(kept) != len(e.get("hooks", [])):
             e["hooks"] = kept
-            say("old SessionStart hook (flat layout) removed")
+            say("old SessionStart hook of this root removed")
     ss[:] = [e for e in ss if e.get("hooks")]
     if not any(h.get("command") == cmd for e in ss for h in e.get("hooks", [])):
         ss.append({"hooks": [{"type": "command", "command": cmd, "timeout": 30, "statusMessage": "workspace bootstrap..."}]})
@@ -522,20 +476,16 @@ def user_settings(root: Path, plugin_dir: Path | None, decisions: dict, facts: d
         d.setdefault("extraKnownMarketplaces", {})[MARKETPLACE] = {"source": {"source": "directory", "path": str(plugin_dir)}}
         d.setdefault("enabledPlugins", {})[PLUGIN] = True
         say(f"plugin {PLUGIN} enabled")
-        name = "caveman-statusline.ps1" if WIN else "caveman-statusline.sh"
-        script = plugin_dir / "src" / "hooks" / name
-        stable = CLAUDE / "hooks" / name
+        script = plugin_dir / "src" / "hooks" / statusline_script()
+        stable = CLAUDE / "hooks" / statusline_script()
         if "statusLine" in d:
             say("you already have a statusLine: left untouched")
         elif script.exists() or dry:
             if not dry:
                 stable.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(script, stable)
-                if not WIN:
-                    stable.chmod(0o755)
-            line = (f'powershell -NoProfile -ExecutionPolicy Bypass -File "{stable.as_posix()}"' if WIN
-                    else f'bash "{stable.as_posix()}"')
-            d["statusLine"] = {"type": "command", "command": line}
+                stable.chmod(0o755)
+            d["statusLine"] = {"type": "command", "command": statusline_command(stable)}
             say("caveman status line set")
     write_json(path, d, dry)
 
@@ -621,18 +571,12 @@ def migrate_flat_layout(root: Path, plugin_dir) -> None:
             say(f"flat layout: .tmp moved to {LEAN}/tmp except {left} item(s) in use: delete {old_tmp} when no session runs")
 
 
-def hide(root: Path) -> None:
+def hide_framework(root: Path) -> None:
     """
-    Windows: hide the framework's own entries so the root shows only projects (and CLAUDE.md).
-    macOS: nothing to do, dot names are already hidden in Finder and ls
+    Hide the framework's own entries so the root shows only projects (and CLAUDE.md)
     """
-    if not WIN:
-        return
-    for name in (LEAN, ".caveman.json", ".claude"):
-        target = root / name
-        if target.exists():
-            subprocess.run(["attrib", "+h", str(target)], capture_output=True)
-    say(f"hidden: {LEAN}, .caveman.json, .claude")
+    if hide([root / name for name in (LEAN, ".caveman.json", ".claude")]):
+        say(f"hidden: {LEAN}, .caveman.json, .claude")
 
 
 def main() -> int:
@@ -682,7 +626,7 @@ def main() -> int:
     save_config(root, decisions, facts, with_caveman, tmp_in_root, dry)
     if not dry:
         migrate_flat_layout(root, plugin_dir)
-        hide(root)
+        hide_framework(root)
         subprocess.run([sys.executable, str(lean(root) / "bootstrap.py")], check=False)
     print(f"\nDone. Check it: {PY} \"{lean(root) / 'doctor.py'}\"   (add --live for a real session test)")
     return 0

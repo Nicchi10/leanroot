@@ -1,7 +1,7 @@
 """
 Check that the lean workspace is really in force.
 
-    python .lean/doctor.py          static checks (free; python3 on macOS)
+    python .lean/doctor.py          static checks (free; python3 on macOS / Linux)
     python .lean/doctor.py --live   also opens two real Claude sessions (Haiku, a few cents): one inside the root, one outside, and
                               checks what their hooks actually did
 
@@ -18,12 +18,11 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True   # no __pycache__ in .lean
+from lean_os import CLAUDE, HOME, PY, caveman_config, system_temps
+
 LEAN = Path(__file__).resolve().parent   # <root>/.lean
 ROOT = LEAN.parent
-WIN = os.name == "nt"
-HOME = Path(os.environ.get("LEAN_HOME") or Path.home())
-CLAUDE = HOME / ".claude"
-PY = "python" if WIN else "python3"
 PLUGIN = "caveman@caveman-lean"
 MARKER = "<!-- lean-workspace:start -->"
 RESULTS: list[tuple[bool, str]] = []
@@ -40,19 +39,6 @@ def read_json(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-
-
-def caveman_config() -> Path:
-    """
-    caveman's user config (same lookup as its hooks): $XDG_CONFIG_HOME, else %APPDATA% on Windows, else ~/.config
-    """
-    if os.environ.get("LEAN_APPDATA"):   # tests only
-        return Path(os.environ["LEAN_APPDATA"]) / "caveman" / "config.json"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        return Path(os.environ["XDG_CONFIG_HOME"]) / "caveman" / "config.json"
-    if WIN:
-        return Path(os.environ.get("APPDATA") or HOME / "AppData" / "Roaming") / "caveman" / "config.json"
-    return HOME / ".config" / "caveman" / "config.json"
 
 
 def plugin_path() -> Path:
@@ -133,10 +119,8 @@ def live() -> None:
     inside = ROOT / f"_doctor_{int(time.time())}"
     # Not tempfile's default dir: with CLAUDE_CODE_TMPDIR set, Claude Code hands TMPDIR=<root>/.lean/tmp to shell commands,
     # and tempfile would put the "outside" folder inside the root
-    candidates = (os.environ.get("TEMP"), os.environ.get("TMP"), HOME / "AppData" / "Local" / "Temp") if WIN else \
-                 (os.environ.get("TMPDIR"), "/tmp")
-    system_tmp = next((Path(p) for p in candidates
-                       if p and ROOT not in Path(p).resolve().parents and Path(p).resolve() != ROOT and Path(p).is_dir()), HOME)
+    system_tmp = next((p for p in system_temps()
+                       if ROOT not in p.resolve().parents and p.resolve() != ROOT and p.is_dir()), HOME)
     outside = Path(tempfile.mkdtemp(prefix="lean_doctor_", dir=system_tmp))
     if ROOT in outside.resolve().parents:
         check(False, f"live: could not find a folder outside the root for the outside test (got {outside})")

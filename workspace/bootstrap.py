@@ -15,7 +15,7 @@ and every git repo one level deeper get their own .claude/settings.local.json (g
 CLAUDE.md, instead, is inherited and lives once at the root.
 
 Usage:
-    python .lean/bootstrap.py           apply to every folder (python3 on macOS)
+    python .lean/bootstrap.py           apply to every folder (python3 on macOS / Linux)
     python .lean/bootstrap.py --check   report only
     python .lean/bootstrap.py --clean-tmp   clean .lean/tmp now and report
     python .lean/bootstrap.py --hook    SessionStart hook: reads the hook JSON on stdin, does nothing outside the root, prints a notice only if a folder changed (valid from
@@ -25,17 +25,18 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import sys
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True   # no __pycache__ in .lean
+from lean_os import HOME, claude_tmp_dirs, norm, outside_rule
+
 LEAN = Path(__file__).resolve().parent   # <root>/.lean holds every file of the framework
 ROOT = LEAN.parent
 ROOT_STR = str(ROOT)
 SKIP = {".git", ".claude", ".lean", ".plugins", "node_modules", "venv", ".venv", "__pycache__"}
-WIN = os.name == "nt"
 
 def load_config() -> dict:
     """
@@ -49,7 +50,7 @@ def load_config() -> dict:
     except Exception:
         cfg = {}
     return {"auto_memory": cfg.get("auto_memory") is True,
-            "unguarded": {u.replace("\\", "/").strip("/").lower() for u in cfg.get("unguarded", [])},
+            "unguarded": {norm(u).strip("/") for u in cfg.get("unguarded", []) if isinstance(u, str)},
             "plugin_dir": cfg.get("plugin_dir") or str(LEAN / "plugins" / "caveman")}
 
 
@@ -85,39 +86,7 @@ def outside_rules(perms: dict) -> list[str]:
     """
     Allow rules naming an absolute user path outside the root (review by hand)
     """
-    if not WIN:
-        return [r for r in perms.get("allow", []) if isinstance(r, str) and outside_posix(r)]
-    flagged = []
-    needle = ROOT_STR.lower().replace("\\", "/")
-    for rule in perms.get("allow", []):
-        low = rule.lower().replace("\\\\", "/").replace("\\", "/")
-        low = low.replace("//" + needle[0] + "/", needle[0] + ":/")
-        if ":/users/" in low and needle not in low and "/appdata/local/temp/claude" not in low:
-            flagged.append(rule)
-    return flagged
-
-
-def outside_posix(rule: str) -> bool:
-    """
-    macOS: a rule naming //abs/path or ~/path outside the root (/path is relative to the settings file).
-    Claude Code temp folders do not count
-    """
-    m = re.search(r"\((//|~/)([^)]*)\)", rule)
-    if not m:
-        return False
-    home = Path(os.environ.get("LEAN_HOME") or Path.home())
-    path = ("/" + m.group(2)) if m.group(1) == "//" else str(home / m.group(2))
-    low, root = path.lower().rstrip("/"), ROOT_STR.lower()
-    if low == root or low.startswith(root + "/"):
-        return False
-    return not re.match(r"/(private/)?(tmp/claude|var/folders/)", low)
-
-
-def claude_tmp_dirs(tmp: Path) -> list[Path]:
-    """
-    Claude Code's own folders inside a temp dir: claude (Windows) or claude-<uid> (macOS)
-    """
-    return [p for p in tmp.glob("claude*") if p.is_dir() and (p.name == "claude" or p.name.startswith("claude-"))]
+    return [r for r in perms.get("allow", []) if outside_rule(r, ROOT_STR, file_tools_only=False)]
 
 
 PLANS_DIR = ".plans"
@@ -152,7 +121,7 @@ def apply(folder: Path, check: bool) -> tuple[bool, list[str]]:
     if not any(Path(d).resolve() == ROOT for d in dirs):
         dirs.append(ROOT_STR)
         changed = True
-    rel = folder.relative_to(ROOT).as_posix().lower()
+    rel = norm(folder.relative_to(ROOT).as_posix()).strip("/")
     if rel not in CONFIG["unguarded"]:
         for key in ("blockReadsOutsideWorkingDirectories", "blockWritesOutsideWorkingDirectories"):
             if perms.get(key) is not True:
@@ -222,8 +191,7 @@ def clean_tmp(force: bool = False) -> tuple[int, int]:
     except Exception:
         days = 7.0
     cutoff = time.time() - days * 86400
-    home = Path(os.environ.get("LEAN_HOME") or Path.home())
-    known = {f.stem for f in (home / ".claude" / "projects").glob("*/*.jsonl")}
+    known = {f.stem for f in (HOME / ".claude" / "projects").glob("*/*.jsonl")}
 
     own = claude_tmp_dirs(tmp)
     candidates = [p for p in tmp.iterdir() if p not in own and p.name != ".last-clean"]

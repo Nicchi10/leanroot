@@ -21,7 +21,7 @@ Removed, for that folder and everything under it:
   .claude/settings.local.json under the workspace root
 
 ~/.claude.json is backed up to ~/.claude/backups first. Everything else is
-deleted for good (no Recycle Bin / Trash). On macOS run it with python3.
+deleted for good (no Recycle Bin / Trash). On macOS / Linux run it with python3.
 """
 from __future__ import annotations
 
@@ -33,29 +33,11 @@ import sys
 import time
 from pathlib import Path
 
-WIN = os.name == "nt"
-HOME = Path(os.environ.get("LEAN_HOME") or Path.home())   # LEAN_HOME: tests only
-CLAUDE = HOME / ".claude"
+sys.dont_write_bytecode = True   # no __pycache__ in .lean
+from lean_os import CLAUDE, HOME, WIN, claude_tmp_dirs, norm, system_temps, under
+
 LEAN = Path(__file__).resolve().parent   # <root>/.lean
 ROOT = LEAN.parent
-BS = chr(92)
-
-
-def norm(p: str) -> str:
-    """Comparable form of a path: lower case, forward slashes, no trailing slash (macOS: //Users -> /Users)."""
-    s = p.replace(BS + BS, "/").replace(BS, "/").strip().rstrip("/").lower()
-    if not WIN:
-        return re.sub(r"^//+", "/", s)
-    s = re.sub(r"^//([a-z])/", r"\1:/", s)   # //c/Users -> c:/users (permission rules)
-    s = re.sub(r"^/([a-z])/", r"\1:/", s)    # /c/Users  -> c:/users (git bash)
-    return s
-
-
-def under(path, target: str) -> bool:
-    if not isinstance(path, str):
-        return False
-    p = norm(path)
-    return p == target or p.startswith(target + "/")
 
 
 def mentions(rule: str, target: str) -> bool:
@@ -151,10 +133,8 @@ def plan(target: str, raw: Path):
         tmp = json.loads((CLAUDE / "settings.json").read_text(encoding="utf-8")).get("env", {}).get("CLAUDE_CODE_TMPDIR")
     except Exception:
         tmp = None
-    temps = {Path(t) for t in (tmp, os.environ.get("CLAUDE_CODE_TMPDIR"), os.environ.get("TEMP"), os.environ.get("TMPDIR"),
-                               None if WIN else "/tmp") if t}
-    bases = {b.resolve() for t in temps if t.is_dir() for b in t.glob("claude*")
-             if b.is_dir() and (b.name == "claude" or b.name.startswith("claude-"))}
+    temps = [Path(t) for t in (tmp, os.environ.get("CLAUDE_CODE_TMPDIR")) if t] + system_temps()
+    bases = {b.resolve() for t in temps for b in claude_tmp_dirs(t)}
     for base in sorted(bases):
         if base.is_dir():
             for sid in sorted(sessions):
