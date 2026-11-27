@@ -128,6 +128,10 @@ The largest fixed cost is often outside your files:
 - Shell commands are not hard-blocked by the perimeter: Claude Code asks before a command that names an outside path, and `CLAUDE.md` tells the agent not to try
 - Claude Code's settings change fast: `doctor.py --live` is the way to know it still works on your version
 
+## Contributing
+
+Issues and pull requests are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 MIT, see `LICENSE`. Free for personal and commercial use.
