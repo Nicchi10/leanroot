@@ -2,6 +2,43 @@
 
 Thanks for helping. Keep changes small and focused: one topic per pull request.
 
+## Issues
+
+Pick one of three types and one area under it. Start the title with both, e.g. `[bug/perimeter] agent reads files outside the root`.
+
+**Bug**: something does not work as documented.
+
+| Area | For |
+|---|---|
+| `perimeter` | an agent reads or writes outside the workspace root |
+| `install` | install.py, the preflight, re-runs, migration from older layouts |
+| `bootstrap` | the session-start hook, per-project settings |
+| `caveman` | the trimmed plugin, mode on/off, status line |
+| `cleanup` | forget.py, `.lean/tmp` cleaning |
+| `os` | something that fails on one system only |
+
+Include: OS, Python version, `claude --version`, the steps to reproduce and the output of `doctor.py`.
+
+**New feature**: something the framework does not do yet.
+
+| Area | For |
+|---|---|
+| `savings` | a new way to cut startup context or tokens |
+| `platform` | a new OS or another coding agent |
+| `tooling` | new checks, commands or options |
+
+Include: the problem it solves and, for `savings`, how much it saves and how you measured it.
+
+**Update**: something outside the repository changed.
+
+| Area | For |
+|---|---|
+| `claude-code` | a Claude Code setting or behaviour changed |
+| `caveman` | a new caveman version to fetch |
+| `docs` | README or CONTRIBUTING out of date, measurements to redo |
+
+Include: what changed, from which version, and a link to the source.
+
 ## Branches
 
 Name the branch after the area you change plus a short description:
